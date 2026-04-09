@@ -17,6 +17,11 @@ if [[ ! -f "$VISION_MODEL" ]]; then
   exit 1
 fi
 
+if [[ ! -f "${VISION_MMPROJ:-}" ]]; then
+  echo "Missing vision mmproj at: ${VISION_MMPROJ:-<unset>}" >&2
+  exit 1
+fi
+
 # Auto-tune on first run of this model
 TUNE_FILE="$SCRIPT_DIR/bench-results/tuned/$(basename "${VISION_MODEL%.gguf}").vision.sh"
 if [[ ! -f "$TUNE_FILE" ]]; then
@@ -48,4 +53,5 @@ exec "$LLAMA_SERVER_BIN" \
   --cache-type-v "$VISION_CACHE_TYPE_V" \
   --flash-attn on \
   --no-warmup \
+  --mmproj "$VISION_MMPROJ" \
   --jinja

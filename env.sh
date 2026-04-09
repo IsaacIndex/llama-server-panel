@@ -34,7 +34,9 @@ export EMBED_THREADS="8"
 export EMBED_POOLING="mean"
 
 
-export VISION_MODEL="${VISION_MODEL:-$MODEL_DIR/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf}"
+export VISION_MODEL="$MODEL_DIR/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf"
+export VISION_MMPROJ="/Users/isaac/models/mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf"
+export VISION_ALIAS="qwen3vl-30b-a3b-instruct"
 export VISION_PORT="8082"
 export VISION_CTX_SIZE="4096"
 export VISION_THREADS="8"
