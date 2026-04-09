@@ -164,13 +164,14 @@ bench_chat() {
     return
   }
 
-  tg_tps=$(echo "$response" | jq -r '.timings.predicted_per_second // 0' 2>/dev/null)
+  # Parse timings — response may contain unescaped control chars, so fallback to /slots
+  tg_tps=$(printf '%s' "$response" | tr -d '\000-\037' | jq -r '.timings.predicted_per_second // 0' 2>/dev/null) || true
 
   # Fallback to /slots endpoint
   if [[ "$tg_tps" == "0" || "$tg_tps" == "null" || -z "$tg_tps" ]]; then
     local slots
     slots=$(curl -sf "http://$TUNE_HOST:$TUNE_PORT/slots" 2>/dev/null || echo "[]")
-    tg_tps=$(echo "$slots" | jq -r '.[0].timings.predicted_per_second // 0' 2>/dev/null)
+    tg_tps=$(printf '%s' "$slots" | jq -r '.[0].timings.predicted_per_second // 0' 2>/dev/null) || true
   fi
 
   stop_server
@@ -252,12 +253,12 @@ if [[ "$MODE" == "chat" ]]; then
     for combo in "${CACHE_COMBOS[@]}"; do
       cache_k="${combo%%:*}"
       cache_v="${combo##*:}"
-      (( current++ ))
+      (( current++ )) || true
       log "[$current/$total] threads=$threads cache_k=$cache_k cache_v=$cache_v"
       score=$(bench_chat "$threads" "$cache_k" "$cache_v")
       log "  -> ${score} tok/s"
 
-      if (( $(echo "$score > $best_score" | bc -l) )); then
+      if [[ $(echo "$score > $best_score" | bc -l) == "1" ]]; then
         best_score="$score"
         best_threads="$threads"
         best_cache_k="$cache_k"
@@ -288,7 +289,7 @@ elif [[ "$MODE" == "embed" ]]; then
   echo ""
 
   for threads in "${THREAD_VALUES[@]}"; do
-    (( current++ ))
+    (( current++ )) || true
     log "[$current/$total] threads=$threads"
     score=$(bench_embed "$threads")
     log "  -> ${score} req/s"
