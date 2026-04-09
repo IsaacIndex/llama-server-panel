@@ -1,9 +1,10 @@
 # Local llama-server setup
 
-This directory runs two dedicated `llama-server` processes:
+This directory runs dedicated `llama-server` processes:
 
 - Chat API on `127.0.0.1:8080` with `Qwen3-30B-A3B-Thinking-2507-UD-IQ3_XXS.gguf`
 - Embeddings API on `127.0.0.1:8081` with `nomic-embed-text-v1.5.Q8_0.gguf`
+- Vision chat API on `127.0.0.1:8083` for multimodal requests
 
 ## Model locations
 
@@ -11,6 +12,7 @@ Place the files here:
 
 - `~/models/Qwen3-30B-A3B-Thinking-2507-UD-IQ3_XXS.gguf`
 - `~/models/nomic-embed-text-v1.5.Q8_0.gguf`
+- `~/models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf`
 
 The committed `env.sh` uses `$HOME/models` and repo-local `logs/` by default.
 For machine-specific paths or ports, create `env.local.sh` next to `env.sh`; it is ignored by git and loaded automatically after `env.sh`.
@@ -20,6 +22,7 @@ For machine-specific paths or ports, create `env.local.sh` next to `env.sh`; it 
 ```zsh
 ./start-chat.sh
 ./start-embed.sh
+./start-vision.sh
 ```
 
 ## Quick test
@@ -49,6 +52,22 @@ curl http://127.0.0.1:8081/v1/embeddings \
   }'
 ```
 
+Vision chat:
+
+```zsh
+curl http://127.0.0.1:8083/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen2.5-vl-3b-instruct",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+      ]}
+    ]
+  }'
+```
+
 ## launchd
 
 Load the agents after the model files exist:
@@ -73,6 +92,8 @@ Logs:
 - `./logs/chat.err.log`
 - `./logs/embed.log`
 - `./logs/embed.err.log`
+- `./logs/vision.log`
+- `./logs/vision.err.log`
 
 ## Note on chat model sizing
 
