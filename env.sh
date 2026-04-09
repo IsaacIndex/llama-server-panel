@@ -39,6 +39,8 @@ export VISION_PORT="8082"
 export VISION_CTX_SIZE="4096"
 export VISION_THREADS="8"
 export VISION_ALIAS="qwen2.5-vl-3b-instruct"
+export VISION_CACHE_TYPE_K="f16"
+export VISION_CACHE_TYPE_V="f16"
 
 if [[ -f "$LLAMA_SERVER_PANEL_DIR/env.local.sh" ]]; then
   source "$LLAMA_SERVER_PANEL_DIR/env.local.sh"

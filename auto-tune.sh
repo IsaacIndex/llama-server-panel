@@ -8,13 +8,14 @@ set -euo pipefail
 # Usage:
 #   ./auto-tune.sh chat    # tune chat model
 #   ./auto-tune.sh embed   # tune embed model
+#   ./auto-tune.sh vision  # tune vision model
 # ───────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR=${0:A:h}
 export LLAMA_SERVER_PANEL_DIR="$SCRIPT_DIR"
 source "$SCRIPT_DIR/env.sh"
 
-MODE="${1:?Usage: $0 <chat|embed>}"
+MODE="${1:?Usage: $0 <chat|embed|vision>}"
 TUNE_PORT="${TUNE_PORT:-9998}"
 TUNE_HOST="$LLAMA_HOST"
 TUNE_STARTUP_TIMEOUT="${TUNE_STARTUP_TIMEOUT:-120}"
@@ -80,7 +81,11 @@ case "$MODE" in
     MODEL_PATH="$EMBED_MODEL"
     CTX_SIZE="$EMBED_CTX_SIZE"
     ;;
-  *) echo "Usage: $0 <chat|embed>" >&2; exit 1 ;;
+  vision)
+    MODEL_PATH="$VISION_MODEL"
+    CTX_SIZE="$VISION_CTX_SIZE"
+    ;;
+  *) echo "Usage: $0 <chat|embed|vision>" >&2; exit 1 ;;
 esac
 
 if [[ ! -f "$MODEL_PATH" ]]; then
@@ -168,6 +173,62 @@ bench_chat() {
   tg_tps=$(printf '%s' "$response" | tr -d '\000-\037' | jq -r '.timings.predicted_per_second // 0' 2>/dev/null) || true
 
   # Fallback to /slots endpoint
+  if [[ "$tg_tps" == "0" || "$tg_tps" == "null" || -z "$tg_tps" ]]; then
+    local slots
+    slots=$(curl -sf "http://$TUNE_HOST:$TUNE_PORT/slots" 2>/dev/null || echo "[]")
+    tg_tps=$(printf '%s' "$slots" | jq -r '.[0].timings.predicted_per_second // 0' 2>/dev/null) || true
+  fi
+
+  stop_server
+  echo "${tg_tps:-0}"
+}
+
+# ── Vision benchmark function ────────────────────────────────────
+
+VISION_BENCH_PROMPT="Describe what you see in this image in detail."
+
+bench_vision() {
+  local threads="$1" cache_k="$2" cache_v="$3"
+
+  SERVER_PID=""
+  "$LLAMA_SERVER_BIN" \
+    --model "$MODEL_PATH" \
+    --host "$TUNE_HOST" --port "$TUNE_PORT" \
+    --ctx-size "$CTX_SIZE" \
+    --threads "$threads" \
+    --no-mmap \
+    --cache-type-k "$cache_k" --cache-type-v "$cache_v" \
+    --flash-attn on \
+    --no-warmup \
+    --jinja \
+    2>"$TUNE_DIR/server-tune.log" &
+  SERVER_PID=$!
+
+  if ! wait_for_server; then
+    err "  Server failed to start (check $TUNE_DIR/server-tune.log)"
+    stop_server
+    echo "0"
+    return
+  fi
+
+  # Warmup
+  curl -sf --max-time 60 "http://$TUNE_HOST:$TUNE_PORT/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"messages":[{"role":"user","content":"Hi"}],"max_tokens":5}' >/dev/null 2>&1 || true
+
+  # Benchmark (text-only prompt — vision model handles it fine)
+  local response tg_tps
+  response=$(curl -sf --max-time 120 "http://$TUNE_HOST:$TUNE_PORT/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg p "$VISION_BENCH_PROMPT" \
+      '{messages:[{role:"user",content:$p}],max_tokens:150,temperature:0.7}')" 2>/dev/null) || {
+    stop_server
+    echo "0"
+    return
+  }
+
+  tg_tps=$(printf '%s' "$response" | tr -d '\000-\037' | jq -r '.timings.predicted_per_second // 0' 2>/dev/null) || true
+
   if [[ "$tg_tps" == "0" || "$tg_tps" == "null" || -z "$tg_tps" ]]; then
     local slots
     slots=$(curl -sf "http://$TUNE_HOST:$TUNE_PORT/slots" 2>/dev/null || echo "[]")
@@ -310,6 +371,46 @@ elif [[ "$MODE" == "embed" ]]; then
 # Best throughput: $best_score req/s
 # Tested: $total configurations
 export EMBED_THREADS=$best_threads
+EOF
+
+elif [[ "$MODE" == "vision" ]]; then
+  CACHE_COMBOS=("f16:f16" "q8_0:q8_0" "q4_0:q4_0" "q8_0:q4_0")
+  total=$(( ${#THREAD_VALUES[@]} * ${#CACHE_COMBOS[@]} ))
+  current=0
+
+  log "Testing $total configurations..."
+  echo ""
+
+  for threads in "${THREAD_VALUES[@]}"; do
+    for combo in "${CACHE_COMBOS[@]}"; do
+      cache_k="${combo%%:*}"
+      cache_v="${combo##*:}"
+      (( current++ )) || true
+      log "[$current/$total] threads=$threads cache_k=$cache_k cache_v=$cache_v"
+      score=$(bench_vision "$threads" "$cache_k" "$cache_v")
+      log "  -> ${score} tok/s"
+
+      if [[ $(echo "$score > $best_score" | bc -l) == "1" ]]; then
+        best_score="$score"
+        best_threads="$threads"
+        best_cache_k="$cache_k"
+        best_cache_v="$cache_v"
+      fi
+    done
+  done
+
+  echo ""
+  log "Best: threads=$best_threads cache_k=$best_cache_k cache_v=$best_cache_v ($best_score tok/s)"
+
+  cat > "$TUNE_FILE" <<EOF
+# Auto-tuned config for $MODEL_NAME ($MODE)
+# Generated: $(date -Iseconds)
+# Host: $(hostname -s 2>/dev/null || echo unknown) (${TOTAL_CORES} cores, ${PERF_CORES} perf)
+# Best generation speed: $best_score tok/s
+# Tested: $total configurations
+export VISION_THREADS=$best_threads
+export VISION_CACHE_TYPE_K=$best_cache_k
+export VISION_CACHE_TYPE_V=$best_cache_v
 EOF
 fi
 
