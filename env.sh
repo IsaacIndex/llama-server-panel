@@ -35,7 +35,7 @@ export EMBED_POOLING="mean"
 
 
 export VISION_MODEL="${VISION_MODEL:-$MODEL_DIR/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf}"
-export VISION_PORT="8083"
+export VISION_PORT="8082"
 export VISION_CTX_SIZE="4096"
 export VISION_THREADS="8"
 export VISION_ALIAS="qwen2.5-vl-3b-instruct"
