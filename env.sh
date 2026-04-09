@@ -1,0 +1,38 @@
+#!/bin/zsh
+
+if [[ -z "${LLAMA_SERVER_PANEL_DIR:-}" ]]; then
+  LLAMA_SERVER_PANEL_DIR=${0:A:h}
+fi
+
+export LLAMA_SERVER_PANEL_DIR
+export LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-/opt/homebrew/bin/llama-server}"
+export LLAMA_HOST="127.0.0.1"
+export MODEL_DIR="${MODEL_DIR:-$HOME/models}"
+export LOG_DIR="${LOG_DIR:-$LLAMA_SERVER_PANEL_DIR/logs}"
+
+# export CHAT_MODEL="$MODEL_DIR/Qwen3-4B-BF16.gguf"
+export CHAT_MODEL="${CHAT_MODEL:-$MODEL_DIR/qwen2.5-7b-instruct-q3_k_m.gguf}"
+# export CHAT_MODEL="$MODEL_DIR/Qwen3-30B-A3B-Thinking-2507-UD-IQ3_XXS.gguf"
+export CHAT_PORT="8080"
+export CHAT_CTX_SIZE="4096"
+export CHAT_THREADS="8"
+export CHAT_PARALLEL="1"
+export CHAT_ALIAS="qwen3-30b-a3b-thinking-2507"
+export CHAT_CACHE_TYPE_K="q8_0"
+export CHAT_CACHE_TYPE_V="q8_0"
+export CHAT_CPU_MOE_LAYERS="40"
+export CHAT_TEMPERATURE="0.6"
+export CHAT_TOP_K="20"
+export CHAT_TOP_P="0.95"
+export CHAT_MIN_P="0"
+export CHAT_PRESENCE_PENALTY="1.5"
+
+export EMBED_MODEL="${EMBED_MODEL:-$MODEL_DIR/nomic-embed-text-v1.5.Q8_0.gguf}"
+export EMBED_PORT="8081"
+export EMBED_CTX_SIZE="2048"
+export EMBED_THREADS="8"
+export EMBED_POOLING="mean"
+
+if [[ -f "$LLAMA_SERVER_PANEL_DIR/env.local.sh" ]]; then
+  source "$LLAMA_SERVER_PANEL_DIR/env.local.sh"
+fi

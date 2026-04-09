@@ -1,0 +1,4 @@
+.DS_Store
+logs/*.log
+logs/*.err.log
+env.local.sh
