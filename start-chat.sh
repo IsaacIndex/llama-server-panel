@@ -17,6 +17,16 @@ if [[ ! -f "$CHAT_MODEL" ]]; then
   exit 1
 fi
 
+# Auto-tune on first run of this model
+TUNE_FILE="$SCRIPT_DIR/bench-results/tuned/$(basename "${CHAT_MODEL%.gguf}").chat.sh"
+if [[ ! -f "$TUNE_FILE" ]]; then
+  echo "First run for $(basename "$CHAT_MODEL") — auto-tuning for fastest inference..."
+  "$SCRIPT_DIR/auto-tune.sh" chat
+fi
+if [[ -f "$TUNE_FILE" ]]; then
+  source "$TUNE_FILE"
+fi
+
 if command -v lsof >/dev/null 2>&1; then
   if lsof -nP -iTCP@"$LLAMA_HOST":"$CHAT_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Port $LLAMA_HOST:$CHAT_PORT is already in use:" >&2

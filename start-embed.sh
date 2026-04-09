@@ -17,6 +17,16 @@ if [[ ! -f "$EMBED_MODEL" ]]; then
   exit 1
 fi
 
+# Auto-tune on first run of this model
+TUNE_FILE="$SCRIPT_DIR/bench-results/tuned/$(basename "${EMBED_MODEL%.gguf}").embed.sh"
+if [[ ! -f "$TUNE_FILE" ]]; then
+  echo "First run for $(basename "$EMBED_MODEL") — auto-tuning for fastest inference..."
+  "$SCRIPT_DIR/auto-tune.sh" embed
+fi
+if [[ -f "$TUNE_FILE" ]]; then
+  source "$TUNE_FILE"
+fi
+
 if command -v lsof >/dev/null 2>&1; then
   if lsof -nP -iTCP@"$LLAMA_HOST":"$EMBED_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Port $LLAMA_HOST:$EMBED_PORT is already in use:" >&2
