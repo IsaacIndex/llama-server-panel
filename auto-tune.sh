@@ -58,6 +58,16 @@ stop_server() {
   sleep 1
 }
 
+now_ms() {
+  local ts
+  ts=$(date +%s%3N 2>/dev/null || true)
+  if [[ "$ts" =~ '^[0-9]+$' ]]; then
+    echo "$ts"
+  else
+    python3 -c 'import time; print(int(time.time() * 1000))'
+  fi
+}
+
 # ── Prereqs ────────────────────────────────────────────────────────
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -272,7 +282,7 @@ bench_embed() {
   # Benchmark: time N requests
   local N=10
   local start_ms end_ms
-  start_ms=$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')
+  start_ms=$(now_ms)
 
   local req_body
   req_body=$(jq -n --arg t "$EMBED_TEXT" '{input:$t,model:"embed"}')
@@ -282,7 +292,7 @@ bench_embed() {
       -d "$req_body" >/dev/null 2>&1 || true
   done
 
-  end_ms=$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')
+  end_ms=$(now_ms)
   local elapsed_ms=$(( end_ms - start_ms ))
   local rps
   if (( elapsed_ms > 0 )); then
