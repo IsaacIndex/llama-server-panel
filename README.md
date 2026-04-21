@@ -17,6 +17,13 @@ Place the files here:
 The committed `env.sh` uses `$HOME/models` and repo-local `logs/` by default.
 For machine-specific paths or ports, create `env.local.sh` next to `env.sh`; it is ignored by git and loaded automatically after `env.sh`.
 
+For embeddings, `start-embed.sh` also forwards:
+
+- `EMBED_BATCH_SIZE` as `llama-server --batch-size` (logical batch limit)
+- `EMBED_UBATCH_SIZE` as `llama-server --ubatch-size` (physical per-input token limit)
+
+With the current defaults, a single embedding input that tokenizes past `512` tokens will fail even if the request contains only one text. The client should trim or split oversized inputs before calling `/v1/embeddings`.
+
 ## Start manually
 
 ```zsh

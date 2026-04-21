@@ -42,5 +42,7 @@ exec "$LLAMA_SERVER_BIN" \
   --port "$EMBED_PORT" \
   --ctx-size "$EMBED_CTX_SIZE" \
   --threads "$EMBED_THREADS" \
+  --batch-size "$EMBED_BATCH_SIZE" \
+  --ubatch-size "$EMBED_UBATCH_SIZE" \
   --embedding \
   --pooling "$EMBED_POOLING"
