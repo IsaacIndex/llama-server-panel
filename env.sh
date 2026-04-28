@@ -31,10 +31,10 @@ export CHAT_PRESENCE_PENALTY="1.5"
 # export EMBED_MODEL="Qwen3-Embedding-4B-Q4_K_M.gguf"
 export EMBED_MODEL="Qwen3-Embedding-4B-Q6_K.gguf"
 export EMBED_PORT="8081"
-export EMBED_CTX_SIZE="2048"
+export EMBED_CTX_SIZE="4096"
 export EMBED_THREADS="8"
-export EMBED_BATCH_SIZE="2048"
-export EMBED_UBATCH_SIZE="1024"
+export EMBED_BATCH_SIZE="32768"
+export EMBED_UBATCH_SIZE="32768"
 export EMBED_POOLING="mean"
 
 
