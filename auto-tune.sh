@@ -261,6 +261,8 @@ bench_embed() {
     --model "$MODEL_PATH" \
     --host "$TUNE_HOST" --port "$TUNE_PORT" \
     --ctx-size "$CTX_SIZE" \
+    --batch-size "$EMBED_BATCH_SIZE" \
+    --ubatch-size "$EMBED_UBATCH_SIZE" \
     --threads "$threads" \
     --embedding \
     --pooling "$EMBED_POOLING" \
