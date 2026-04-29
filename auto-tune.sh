@@ -264,6 +264,8 @@ bench_embed() {
     --batch-size "$EMBED_BATCH_SIZE" \
     --ubatch-size "$EMBED_UBATCH_SIZE" \
     --threads "$threads" \
+    --batch-size "$EMBED_BATCH_SIZE" \
+    --ubatch-size "$EMBED_UBATCH_SIZE" \
     --embedding \
     --pooling "$EMBED_POOLING" \
     2>"$TUNE_DIR/server-tune.log" &

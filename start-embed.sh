@@ -44,5 +44,7 @@ exec "$LLAMA_SERVER_BIN" \
   --batch-size "$EMBED_BATCH_SIZE" \
   --ubatch-size "$EMBED_UBATCH_SIZE" \
   --threads "$EMBED_THREADS" \
+  --batch-size "$EMBED_BATCH_SIZE" \
+  --ubatch-size "$EMBED_UBATCH_SIZE" \
   --embedding \
   --pooling "$EMBED_POOLING"
