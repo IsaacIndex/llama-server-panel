@@ -88,6 +88,43 @@ Useful juggler overrides:
 - `JUGGLE_STARTUP_TIMEOUT_SECONDS=900`
 - `JUGGLE_REQUEST_TIMEOUT_SECONDS=3600`
 
+## Share as a nearby service
+
+Use the service gateway when another nearby laptop should call this llama setup through one OpenAI-compatible base URL. This is intended for a trusted USB-C/Thunderbolt direct link; it does not configure macOS networking, TLS, or API-key auth.
+
+```zsh
+./start-service.sh
+```
+
+The gateway listens on `0.0.0.0:8088` by default and keeps supervised llama backends on `127.0.0.1`. It prints local IPv4 client URL candidates and prefers link-local or bridge addresses that are likely to belong to a direct Mac-to-Mac link.
+
+On the other laptop, use the printed direct-link URL:
+
+```zsh
+export OPENAI_BASE_URL=http://<printed-ip>:8088/v1
+export OPENAI_API_KEY=local
+```
+
+Gateway routing:
+
+- `POST /v1/embeddings` uses the embedding model.
+- `POST /v1/chat/completions` uses vision when the request model matches `VISION_ALIAS` or the messages include image content; otherwise it uses the chat model.
+- `GET /v1/models` returns the combined chat, embedding, and vision model list.
+
+Useful service commands:
+
+```zsh
+./start-service.sh --dry-run
+./start-service.sh --check
+./start-service.sh --port 8090
+./start-service.sh --bind 127.0.0.1
+```
+
+Useful service overrides:
+
+- `SERVICE_GATEWAY_PORT=8088`
+- `SERVICE_GATEWAY_BIND=0.0.0.0`
+
 ## Quick test
 
 Chat:

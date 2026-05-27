@@ -307,6 +307,6 @@ case "$MODE" in
   exec)
     validate_files
     check_port_free
-    exec "${argv[@]}"
+    exec "${ROLE_ARGV[@]}"
     ;;
 esac
