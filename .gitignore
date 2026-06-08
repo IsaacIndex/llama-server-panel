@@ -2,5 +2,8 @@
 logs/*.log
 logs/*.err.log
 env.local.sh
+env.local.env
+env.local.json
 bench-results/tuned/
-__pycache__
+__pycache__/
+*.pyc

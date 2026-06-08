@@ -11,4 +11,4 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-exec "$PYTHON_BIN" "$SCRIPT_DIR/scripts/llama_role_command.py" exec vision --auto-tune "$@"
+exec "$PYTHON_BIN" "$SCRIPT_DIR/scripts/model_juggler.py" --gateway "$@"
