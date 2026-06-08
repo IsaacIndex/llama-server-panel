@@ -1,10 +1,18 @@
 # Local llama-server setup
 
-This directory runs dedicated `llama-server` processes:
+This directory runs dedicated `llama-server` processes through cross-platform Python entrypoints:
 
 - Chat API on `127.0.0.1:8080` with the configured `CHAT_MODEL`
 - Embeddings API on `127.0.0.1:8081` with the configured `EMBED_MODEL`
 - Vision chat API on `127.0.0.1:8082` with the configured `VISION_MODEL` and `VISION_MMPROJ`
+
+The checked-in `.sh` commands now work on macOS/Linux without requiring `zsh`, and matching `.cmd` launchers are available for Windows.
+
+## Prerequisites
+
+- Python 3
+- `llama-server` installed either on `PATH` or at `LLAMA_SERVER_BIN`
+- the configured GGUF model files
 
 ## Model locations
 
@@ -13,10 +21,24 @@ Place the files here:
 - `~/models/Mistral-Small-3.2-24B-Instruct-2506-BF16.gguf`
 - `~/models/Qwen3-Embedding-4B-Q6_K.gguf`
 - `~/models/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf`
-- the `VISION_MMPROJ` path configured in `env.sh` or `env.local.sh`
+- the `VISION_MMPROJ` path configured by your local overrides
 
-The committed `env.sh` uses `$HOME/models` and repo-local `logs/` by default.
-For machine-specific paths or ports, create `env.local.sh` next to `env.sh`; it is ignored by git and loaded automatically after `env.sh`.
+Defaults are mirrored from `env.sh`: model files under `$HOME/models` and logs under `./logs`.
+
+For machine-specific paths, ports, or binary locations, create one of these ignored local override files in the repo root:
+
+- `env.local.env` for portable `KEY=value` overrides
+- `env.local.json` for structured overrides
+- `env.local.sh` for legacy simple `export KEY=value` overrides
+
+Configuration is applied in this order:
+
+1. built-in defaults mirrored from `env.sh`
+2. current process environment
+3. `env.local.env`
+4. `env.local.json`
+5. `env.local.sh`
+6. the role-specific tune file under `bench-results/tuned/`, if present
 
 For embeddings, `start-embed.sh` also forwards:
 
@@ -27,37 +49,58 @@ With the current defaults, a single embedding input that tokenizes past `EMBED_U
 
 ## Start manually
 
-```zsh
+macOS/Linux:
+
+```sh
 ./start-chat.sh
 ./start-embed.sh
 ./start-vision.sh
 ```
 
-The direct start scripts delegate to `scripts/llama_role_command.sh`, which is the shared source of truth for role-specific `llama-server` arguments. The helper loads configuration in this order:
+Windows:
 
-1. `env.sh`
-2. `env.local.sh`
-3. the role-specific tune file under `bench-results/tuned/`, if present
-4. an optional caller-provided port override
+```powershell
+.\start-chat.cmd
+.\start-embed.cmd
+.\start-vision.cmd
+```
+
+The direct launchers delegate to `scripts/llama_role_command.py`, which is the shared source of truth for role-specific `llama-server` arguments.
 
 ## Juggle full-context models
 
 Use the juggler when you need all three APIs to be callable but cannot keep chat and vision resident at the same time. The juggler keeps embeddings always on when possible, and switches between chat and vision on demand while preserving each role's individual settings and full context window.
 
-```zsh
+macOS/Linux:
+
+```sh
 ./juggle-models.sh
+```
+
+Windows:
+
+```powershell
+.\juggle-models.cmd
 ```
 
 Dry-run the resolved ports and backend commands without starting models:
 
-```zsh
+```sh
 ./juggle-models.sh --dry-run
+```
+
+```powershell
+.\juggle-models.cmd --dry-run
 ```
 
 Validate configured files without starting the proxy:
 
-```zsh
+```sh
 ./juggle-models.sh --check
+```
+
+```powershell
+.\juggle-models.cmd --check
 ```
 
 Default public endpoints:
@@ -74,7 +117,7 @@ Default supervised backend ports:
 
 If HKJC FastAPI or Podman is already occupying host port `8080`, the juggler falls chat back to `18080`. In that case use:
 
-```zsh
+```sh
 LLAMA_SERVER_CHAT_BASE_URL_DOCKER=http://host.docker.internal:18080/v1
 ```
 
@@ -90,17 +133,25 @@ Useful juggler overrides:
 
 ## Share as a nearby service
 
-Use the service gateway when another nearby laptop should call this llama setup through one OpenAI-compatible base URL. This is intended for a trusted USB-C/Thunderbolt direct link; it does not configure macOS networking, TLS, or API-key auth.
+Use the service gateway when another nearby laptop should call this llama setup through one OpenAI-compatible base URL. This is intended for a trusted direct/private link; it does not configure networking, TLS, or API-key auth.
 
-```zsh
+macOS/Linux:
+
+```sh
 ./start-service.sh
 ```
 
-The gateway listens on `0.0.0.0:8088` by default and keeps supervised llama backends on `127.0.0.1`. It prints local IPv4 client URL candidates and prefers link-local or bridge addresses that are likely to belong to a direct Mac-to-Mac link.
+Windows:
+
+```powershell
+.\start-service.cmd
+```
+
+The gateway listens on `0.0.0.0:8088` by default and keeps supervised llama backends on `127.0.0.1`. It prints local IPv4 client URL candidates and prefers link-local or bridge-style addresses when they are available.
 
 On the other laptop, use the printed direct-link URL:
 
-```zsh
+```sh
 export OPENAI_BASE_URL=http://<printed-ip>:8088/v1
 export OPENAI_API_KEY=local
 ```
@@ -113,17 +164,52 @@ Gateway routing:
 
 Useful service commands:
 
-```zsh
+```sh
 ./start-service.sh --dry-run
 ./start-service.sh --check
 ./start-service.sh --port 8090
 ./start-service.sh --bind 127.0.0.1
 ```
 
+```powershell
+.\start-service.cmd --dry-run
+.\start-service.cmd --check
+.\start-service.cmd --port 8090
+.\start-service.cmd --bind 127.0.0.1
+```
+
 Useful service overrides:
 
 - `SERVICE_GATEWAY_PORT=8088`
 - `SERVICE_GATEWAY_BIND=0.0.0.0`
+
+## Benchmark and auto-tune
+
+Auto-tune writes per-role overrides under `bench-results/tuned/`:
+
+```sh
+./auto-tune.sh chat
+./auto-tune.sh embed
+./auto-tune.sh vision
+```
+
+```powershell
+.\auto-tune.cmd chat
+.\auto-tune.cmd embed
+.\auto-tune.cmd vision
+```
+
+Run the generic benchmark harness with:
+
+```sh
+./benchmark.sh
+./benchmark.sh model1.gguf model2.gguf
+```
+
+```powershell
+.\benchmark.cmd
+.\benchmark.cmd model1.gguf model2.gguf
+```
 
 ## Quick test
 
@@ -168,7 +254,7 @@ curl http://127.0.0.1:8082/v1/chat/completions \
   }'
 ```
 
-## launchd
+## macOS launchd
 
 Load the agents after the model files exist:
 

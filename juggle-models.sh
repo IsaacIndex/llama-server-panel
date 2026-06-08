@@ -1,13 +1,13 @@
-#!/bin/zsh
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-SCRIPT_DIR=${0:A:h}
-export LLAMA_SERVER_PANEL_DIR="$SCRIPT_DIR"
-source "$SCRIPT_DIR/env.sh"
-
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON_BIN=${PYTHON_BIN:-python3}
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Missing Python interpreter: $PYTHON_BIN" >&2
+  PYTHON_BIN=python
+fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Missing Python interpreter. Set PYTHON_BIN or install python3/python." >&2
   exit 1
 fi
 

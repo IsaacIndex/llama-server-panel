@@ -11,7 +11,6 @@ import json
 import os
 import re
 import shlex
-import signal
 import socket
 import subprocess
 import sys
@@ -22,6 +21,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlsplit
+
+from llama_runtime import (
+    PanelError,
+    build_role_argv,
+    load_config,
+    popen_session_kwargs,
+    port_in_use as runtime_port_in_use,
+    role_environment,
+    terminate_process as terminate_runtime_process,
+    validate_role_files,
+)
 
 
 HEAVY_ROLES = {"chat", "vision"}
@@ -52,77 +62,35 @@ def repo_dir() -> Path:
 
 
 REPO_DIR = repo_dir()
-HELPER = REPO_DIR / "scripts" / "llama_role_command.sh"
-
-
-def parse_env0(payload: bytes) -> Dict[str, str]:
-    result: Dict[str, str] = {}
-    for record in payload.split(b"\0"):
-        if not record:
-            continue
-        text = record.decode("utf-8")
-        key, _, value = text.partition("=")
-        result[key] = value
-    return result
-
-
-def run_helper(
-    mode: str,
-    role: str,
-    *,
-    port: Optional[int] = None,
-    host: Optional[str] = None,
-    auto_tune: bool = False,
-) -> bytes:
-    cmd: List[str] = ["/bin/zsh", str(HELPER), mode, role]
-    if port is not None:
-        cmd.extend(["--port", str(port)])
-    if host is not None:
-        cmd.extend(["--host", host])
-    if auto_tune:
-        cmd.append("--auto-tune")
-
-    proc = subprocess.run(
-        cmd,
-        cwd=str(REPO_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise StartupError(stderr or f"{mode} {role} failed with exit code {proc.returncode}")
-    if proc.stderr:
-        sys.stderr.write(proc.stderr.decode("utf-8", errors="replace"))
-    return proc.stdout
 
 
 def helper_env(role: str, *, port: Optional[int] = None, host: Optional[str] = None) -> Dict[str, str]:
-    return parse_env0(run_helper("env0", role, port=port, host=host))
+    try:
+        return role_environment(role, panel_dir=REPO_DIR, port_override=port, host_override=host)
+    except PanelError as exc:
+        raise StartupError(str(exc)) from exc
 
 
 def helper_argv(role: str, *, port: int, host: str, auto_tune: bool) -> List[str]:
-    payload = run_helper("argv0", role, port=port, host=host, auto_tune=auto_tune)
-    return [part.decode("utf-8") for part in payload.split(b"\0") if part]
+    try:
+        return build_role_argv(role, panel_dir=REPO_DIR, port_override=port, host_override=host, auto_tune=auto_tune)
+    except PanelError as exc:
+        raise StartupError(str(exc)) from exc
 
 
 def helper_check(role: str) -> None:
-    run_helper("check", role)
+    try:
+        validate_role_files(role, role_environment_to_config(role))
+    except PanelError as exc:
+        raise StartupError(str(exc)) from exc
+
+
+def role_environment_to_config(role: str) -> Dict[str, str]:
+    return load_config(REPO_DIR, role=role)
 
 
 def port_is_open(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.4)
-        if sock.connect_ex((host, port)) == 0:
-            return True
-
-    lsof = subprocess.run(
-        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return lsof.returncode == 0
+    return runtime_port_in_use(host, port)
 
 
 def llama_ready(host: str, port: int, timeout: float = 1.5) -> bool:
@@ -270,7 +238,7 @@ class JugglerState:
                 cwd=str(REPO_DIR),
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                **popen_session_kwargs(),
             )
         finally:
             log_fh.close()
@@ -285,21 +253,7 @@ class JugglerState:
             return
 
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            runtime.process = None
-            return
-        except OSError:
-            proc.terminate()
-
-        try:
-            proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
-            proc.wait(timeout=10)
+            terminate_runtime_process(proc)
         finally:
             runtime.process = None
 
@@ -559,6 +513,12 @@ def address_sort_key(address: LocalAddress) -> tuple[int, str, str]:
 
 
 def local_ipv4_addresses() -> List[LocalAddress]:
+    if os.name == "nt":
+        return local_ipv4_addresses_windows()
+    return local_ipv4_addresses_unix()
+
+
+def local_ipv4_addresses_unix() -> List[LocalAddress]:
     try:
         proc = subprocess.run(
             ["ifconfig"],
@@ -605,6 +565,51 @@ def local_ipv4_addresses() -> List[LocalAddress]:
             if ip.is_loopback or ip.is_unspecified:
                 continue
             addresses.append(LocalAddress(interface, address, status))
+    return sorted(addresses, key=address_sort_key)
+
+
+def local_ipv4_addresses_windows() -> List[LocalAddress]:
+    try:
+        proc = subprocess.run(
+            ["ipconfig"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return []
+    if proc.returncode != 0:
+        return []
+
+    addresses: List[LocalAddress] = []
+    interface = "unknown"
+    status = "active"
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line == stripped and stripped.endswith(":"):
+            interface = stripped[:-1]
+            status = "active"
+            continue
+        if stripped.lower().startswith("media state") and "disconnected" in stripped.lower():
+            status = "inactive"
+            continue
+        if "IPv4 Address" not in stripped and "Autoconfiguration IPv4 Address" not in stripped:
+            continue
+
+        _, _, value = stripped.partition(":")
+        address = value.replace("(Preferred)", "").strip()
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_unspecified:
+            continue
+        addresses.append(LocalAddress(interface, address, status))
+
     return sorted(addresses, key=address_sort_key)
 
 
@@ -827,11 +832,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--gateway", action="store_true", help="serve one OpenAI-compatible gateway for all roles")
     parser.add_argument(
         "--gateway-bind",
+        "--bind",
+        dest="gateway_bind",
         default=os.environ.get("SERVICE_GATEWAY_BIND", GATEWAY_DEFAULT_BIND),
         help="bind address for --gateway mode",
     )
     parser.add_argument(
         "--gateway-port",
+        "--port",
+        dest="gateway_port",
         type=int,
         default=parse_int_env("SERVICE_GATEWAY_PORT", GATEWAY_DEFAULT_PORT),
         help="port for --gateway mode",
