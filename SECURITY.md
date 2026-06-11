@@ -6,7 +6,9 @@ Security fixes are expected to land on `main` until the project adopts versioned
 
 ## Reporting
 
-No public reporting address has been selected yet. Before publishing the repository, replace this section with the preferred security contact or GitHub private vulnerability reporting instructions.
+Report security issues by emailing `isaacwongnh@gmail.com`.
+
+If GitHub private vulnerability reporting is enabled for this repository, use that channel for sensitive reports.
 
 ## Operational Notes
 

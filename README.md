@@ -299,7 +299,7 @@ The build writes ignored output under:
 - `dist/`
 - `release/`
 
-The generated zip contains the GUI executable, `.env.example`, README, license placeholder, and security notes. The source launchers remain available from the repository checkout.
+The generated zip contains the GUI executable, `.env.example`, README, license, and security notes. The source launchers remain available from the repository checkout.
 
 ## Release
 
@@ -326,4 +326,4 @@ Use the manual `workflow_dispatch` trigger when you only want to test packaging 
 
 ## License
 
-No open-source license has been selected yet. Add a real license before public release. MIT is a simple option for permissive source distribution; Apache-2.0 is a stronger option when an explicit patent grant matters.
+This project is released under the MIT License. See [LICENSE](LICENSE).
