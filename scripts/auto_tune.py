@@ -32,6 +32,13 @@ from llama_runtime import (
 
 
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+MEMORY_PROJECTION_RE = re.compile(
+    r"projected to use\s+(\d+)\s+MiB of device memory vs\.\s+(\d+)\s+MiB of free device memory"
+)
+MEMORY_FIT_FAILURE_MARKERS = (
+    "cannot meet free memory target",
+    "failed to fit params to free device memory",
+)
 BENCH_PROMPT = "Explain the concept of recursion in programming with a clear example."
 VISION_BENCH_PROMPT = "Describe what you see in this image in detail."
 EMBED_TEXT = (
@@ -89,15 +96,58 @@ def request_json_list(url: str, *, timeout: float) -> list[dict[str, Any]]:
     return []
 
 
-def wait_for_server(host: str, port: int, timeout_seconds: int) -> bool:
+def wait_for_server(
+    host: str,
+    port: int,
+    timeout_seconds: int,
+    *,
+    proc: Optional[subprocess.Popen[bytes]] = None,
+    log_path: Optional[Path] = None,
+    memory_headroom_mib: int = 512,
+) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            err(f"  Server exited during startup with code {proc.returncode}")
+            return False
+        if proc is not None and log_path is not None:
+            pressure = startup_memory_pressure_message(log_path, memory_headroom_mib=memory_headroom_mib)
+            if pressure:
+                err(f"  {pressure}")
+                terminate_process(proc)
+                return False
         try:
             request_json("GET", f"http://{host}:{port}/health", timeout=1.5)
             return True
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             time.sleep(1)
     return False
+
+
+def startup_memory_pressure_message(log_path: Path, *, memory_headroom_mib: int = 512) -> str:
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+
+    lowered = text.lower()
+    for marker in MEMORY_FIT_FAILURE_MARKERS:
+        if marker in lowered:
+            return f"Terminating candidate early: llama.cpp reported memory fit failure in {log_path}"
+
+    matches = list(MEMORY_PROJECTION_RE.finditer(text))
+    if not matches:
+        return ""
+    match = matches[-1]
+    projected_mib = int(match.group(1))
+    free_mib = int(match.group(2))
+    if projected_mib + memory_headroom_mib >= free_mib:
+        return (
+            "Terminating candidate early: projected device memory "
+            f"{projected_mib} MiB is too close to free memory {free_mib} MiB "
+            f"(headroom {memory_headroom_mib} MiB)"
+        )
+    return ""
 
 
 def score_from_slots(host: str, port: int) -> float:
@@ -161,7 +211,7 @@ def bench_chat_like(
 
     proc = start_server(role, config, host=host, port=port, log_path=log_path)
     try:
-        if not wait_for_server(host, port, startup_timeout):
+        if not wait_for_server(host, port, startup_timeout, proc=proc, log_path=log_path):
             err(f"  Server failed to start (check {log_path})")
             return 0.0
 
@@ -220,7 +270,7 @@ def bench_embed(
 
     proc = start_server("embed", config, host=host, port=port, log_path=log_path)
     try:
-        if not wait_for_server(host, port, startup_timeout):
+        if not wait_for_server(host, port, startup_timeout, proc=proc, log_path=log_path):
             err(f"  Server failed to start (check {log_path})")
             return 0.0
 
@@ -331,6 +381,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     best_cache_v = cache_v
 
         log(f"Best: threads={best_threads} cache_k={best_cache_k} cache_v={best_cache_v} ({best_score:.2f} tok/s)")
+        if best_score <= 0:
+            raise PanelError(
+                f"No working {args.role} tuning configuration started. "
+                f"Check {log_path}; lowering {prefix}_CTX_SIZE may be required."
+            )
         prefix = "CHAT" if args.role == "chat" else "VISION"
         write_tune_file(
             args.role,
@@ -363,6 +418,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             best_threads = str(threads)
 
     log(f"Best: threads={best_threads} ({best_score:.2f} req/s)")
+    if best_score <= 0:
+        raise PanelError(
+            f"No working {args.role} tuning configuration started. "
+            f"Check {log_path}; lowering EMBED_CTX_SIZE may be required."
+        )
     write_tune_file(
         args.role,
         config,

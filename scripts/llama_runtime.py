@@ -281,7 +281,10 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
         check=False,
     )
     if proc.returncode != 0:
-        raise PanelError(f"auto-tune failed for {role}")
+        raise PanelError(
+            f"auto-tune failed for {role} while creating {tune_path}. "
+            f"Check {panel_dir / 'bench-results' / 'tuned' / 'server-tune.log'}."
+        )
 
 
 def role_environment(
