@@ -15,6 +15,7 @@ from llama_runtime import PanelError, load_config
 from panel_gui import (
     build_gui_overrides,
     compact_path_value,
+    default_assign_key_for_role,
     gui_override_path,
     import_model_file,
     model_dir_from_value,
@@ -104,6 +105,13 @@ class PanelGuiHelpersTest(unittest.TestCase):
             self.assertEqual(overrides["CHAT_MODEL"], "chat.gguf")
             self.assertEqual(overrides["LOG_DIR"], "logs")
             self.assertEqual(overrides["CHAT_ALIAS"], "chat-local")
+
+    def test_default_assign_key_tracks_role_tabs(self) -> None:
+        self.assertEqual(default_assign_key_for_role("chat"), "CHAT_MODEL")
+        self.assertEqual(default_assign_key_for_role("embed"), "EMBED_MODEL")
+        self.assertEqual(default_assign_key_for_role("vision"), "VISION_MODEL")
+        with self.assertRaises(PanelError):
+            default_assign_key_for_role("rerank")
 
 
 if __name__ == "__main__":

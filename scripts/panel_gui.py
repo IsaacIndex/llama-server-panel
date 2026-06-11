@@ -50,6 +50,11 @@ ROLE_PREFIX = {
     "embed": "EMBED",
     "vision": "VISION",
 }
+ROLE_ASSIGN_KEYS = {
+    "chat": "CHAT_MODEL",
+    "embed": "EMBED_MODEL",
+    "vision": "VISION_MODEL",
+}
 CONFIG_KEYS = (
     "LLAMA_SERVER_BIN",
     "MODEL_DIR",
@@ -209,6 +214,13 @@ def discover_models(model_dir: Path) -> list[Path]:
     return sorted(model_dir.glob("*.gguf"), key=lambda path: path.name.lower())
 
 
+def default_assign_key_for_role(role: str) -> str:
+    try:
+        return ROLE_ASSIGN_KEYS[role]
+    except KeyError as exc:
+        raise PanelError(f"Unsupported role for model assignment: {role}") from exc
+
+
 def process_running(proc: Optional[subprocess.Popen[bytes]]) -> bool:
     return proc is not None and proc.poll() is None
 
@@ -316,11 +328,16 @@ def run_gui() -> int:
 
             role_tabs = ttk.Notebook(role_frame)
             role_tabs.grid(row=0, column=0, sticky="nsew")
+            self.role_tabs = role_tabs
+            self.role_tab_roles: Dict[str, str] = {}
             for role in ROLES:
-                role_page = ttk.Frame(role_tabs, padding=4)
+                tab_frame, role_page = self._scrollable_role_page(role_tabs, ttk, tk)
                 role_page.columnconfigure(1, weight=1)
-                role_tabs.add(role_page, text=ROLE_LABELS[role])
+                role_tabs.add(tab_frame, text=ROLE_LABELS[role])
+                self.role_tab_roles[str(tab_frame)] = role
                 self._role_block(role_page, ttk, role, 0)
+            role_tabs.bind("<<NotebookTabChanged>>", self.on_role_tab_changed)
+            self.on_role_tab_changed()
 
             juggler = ttk.LabelFrame(right, text="Juggler", padding=10)
             juggler.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -353,6 +370,54 @@ def run_gui() -> int:
             output_scroll.grid(row=0, column=1, sticky="ns")
             self.output.configure(yscrollcommand=output_scroll.set)
 
+        def _scrollable_role_page(self, notebook, ttk, tk):
+            outer = ttk.Frame(notebook)
+            outer.columnconfigure(0, weight=1)
+            outer.rowconfigure(0, weight=1)
+
+            canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            y_scroll = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+            y_scroll.grid(row=0, column=1, sticky="ns")
+            x_scroll = ttk.Scrollbar(outer, orient=tk.HORIZONTAL, command=canvas.xview)
+            x_scroll.grid(row=1, column=0, sticky="ew")
+            canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+            inner = ttk.Frame(canvas, padding=4)
+            window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+            def refresh_scroll_region(_event=None) -> None:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def fit_inner_width(event) -> None:
+                requested_width = inner.winfo_reqwidth()
+                canvas.itemconfigure(window_id, width=max(event.width, requested_width))
+                refresh_scroll_region()
+
+            def on_mousewheel(event) -> str:
+                if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+                    canvas.yview_scroll(-1, "units")
+                else:
+                    canvas.yview_scroll(1, "units")
+                return "break"
+
+            def bind_mousewheel(_event=None) -> None:
+                canvas.bind_all("<MouseWheel>", on_mousewheel)
+                canvas.bind_all("<Button-4>", on_mousewheel)
+                canvas.bind_all("<Button-5>", on_mousewheel)
+
+            def unbind_mousewheel(_event=None) -> None:
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Button-4>")
+                canvas.unbind_all("<Button-5>")
+
+            inner.bind("<Configure>", refresh_scroll_region)
+            canvas.bind("<Configure>", fit_inner_width)
+            for widget in (outer, canvas, inner):
+                widget.bind("<Enter>", bind_mousewheel)
+            outer.bind("<Leave>", unbind_mousewheel)
+            return outer, inner
+
         def _var(self, key: str) -> "tk.StringVar":
             if key not in self.values:
                 import tkinter as tk
@@ -383,9 +448,6 @@ def run_gui() -> int:
             if role == "vision":
                 self._entry_row(parent, ttk, "MMProj", "VISION_MMPROJ", row, browse_file=True)
                 row += 1
-            if role in {"chat", "vision"}:
-                self._entry_row(parent, ttk, "Alias", f"{prefix}_ALIAS", row)
-                row += 1
 
             compact = ttk.Frame(parent)
             compact.grid(row=row, column=0, columnspan=5, sticky="ew", pady=(0, 6))
@@ -393,6 +455,12 @@ def run_gui() -> int:
                 ttk.Label(compact, text=key.replace(f"{prefix}_", "").title()).grid(row=0, column=idx * 2, sticky="w", padx=(0 if idx == 0 else 12, 4))
                 ttk.Entry(compact, textvariable=self._var(key), width=10).grid(row=0, column=idx * 2 + 1, sticky="w")
             return row + 1
+
+        def on_role_tab_changed(self, _event=None) -> None:
+            tab_id = self.role_tabs.select()
+            role = self.role_tab_roles.get(str(tab_id))
+            if role is not None:
+                self.selected_assign_key.set(default_assign_key_for_role(role))
 
         def browse_file(self, key: str) -> None:
             path = filedialog.askopenfilename(title=f"Select {key}", initialdir=self.values.get("MODEL_DIR", self._var("MODEL_DIR")).get() or str(Path.home()))
