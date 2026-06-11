@@ -14,6 +14,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from update_checker import VERSION_FILE_NAME, current_app_version
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "llama-server-panel"
@@ -83,6 +85,13 @@ def write_checksum(path: Path) -> Path:
     return checksum_path
 
 
+def release_version() -> str | None:
+    github_ref_name = os.environ.get("GITHUB_REF_NAME", "").strip()
+    if os.environ.get("GITHUB_REF_TYPE") == "tag" and github_ref_name:
+        return github_ref_name
+    return current_app_version(ROOT).value
+
+
 def build_archive(executable: Path) -> Path:
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = RELEASE_DIR / f"{APP_NAME}-{platform_slug()}.zip"
@@ -95,8 +104,11 @@ def build_archive(executable: Path) -> Path:
         ROOT / "LICENSE",
         ROOT / "SECURITY.md",
     ]
+    version = release_version()
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(executable, executable.name)
+        if version:
+            archive.writestr(VERSION_FILE_NAME, f"{version}\n")
         for doc in docs:
             if doc.is_file():
                 archive.write(doc, doc.name)

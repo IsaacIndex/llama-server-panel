@@ -36,6 +36,7 @@ from model_juggler import (
     make_handler,
     parse_int_env,
 )
+from update_checker import UpdateCheckResult, check_for_updates
 
 
 ROLES = ("chat", "embed", "vision")
@@ -228,6 +229,7 @@ def run_gui() -> int:
             self.role_processes: Dict[str, subprocess.Popen[bytes]] = {}
             self.juggler_handle: Optional[JugglerHandle] = None
             self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
+            self.update_check_running = False
 
             self.root.title("Llama Server Panel")
             self.root.geometry("1180x760")
@@ -266,8 +268,10 @@ def run_gui() -> int:
             header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
             header.columnconfigure(1, weight=1)
             ttk.Label(header, text="Llama Server Panel", font=("TkDefaultFont", 18, "bold")).grid(row=0, column=0, sticky="w")
-            ttk.Button(header, text="Save Config", command=self.save_config, style="Accent.TButton").grid(row=0, column=2, padx=(8, 0))
-            ttk.Button(header, text="Reload", command=self.reload_config).grid(row=0, column=3, padx=(8, 0))
+            self.check_updates_button = ttk.Button(header, text="Check Updates", command=self.check_updates)
+            self.check_updates_button.grid(row=0, column=2, padx=(8, 0))
+            ttk.Button(header, text="Save Config", command=self.save_config, style="Accent.TButton").grid(row=0, column=3, padx=(8, 0))
+            ttk.Button(header, text="Reload", command=self.reload_config).grid(row=0, column=4, padx=(8, 0))
 
             general = ttk.LabelFrame(main, text="Paths", padding=10)
             general.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
@@ -635,6 +639,22 @@ def run_gui() -> int:
                 self.juggler_handle = None
                 self.juggler_status.set("Stopped")
 
+        def check_updates(self) -> None:
+            if self.update_check_running:
+                self.append_output("Update check is already running\n")
+                return
+            self.update_check_running = True
+            self.check_updates_button.configure(state="disabled")
+            self.append_output("Checking GitHub releases for updates...\n")
+            threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
+        def _check_updates_worker(self) -> None:
+            try:
+                result = check_for_updates(self.panel_dir)
+                self.queue.put(("update_check_result", result))
+            except Exception as exc:
+                self.queue.put(("update_check_error", str(exc)))
+
         def refresh_status(self) -> None:
             try:
                 config = load_config(self.panel_dir, apply_tune=False)
@@ -675,6 +695,20 @@ def run_gui() -> int:
                 elif kind == "juggler_error":
                     self.juggler_status.set("Stopped")
                     messagebox.showerror("Juggler start failed", str(payload))
+                elif kind == "update_check_result":
+                    result = payload
+                    if isinstance(result, UpdateCheckResult):
+                        self.append_output(f"{result.message}\n")
+                        title = "Update available" if result.update_available else "Updates"
+                        messagebox.showinfo(title, result.message)
+                    self.update_check_running = False
+                    self.check_updates_button.configure(state="normal")
+                elif kind == "update_check_error":
+                    self.update_check_running = False
+                    self.check_updates_button.configure(state="normal")
+                    message = str(payload)
+                    self.append_output(f"Update check failed: {message}\n")
+                    messagebox.showerror("Update check failed", message)
             self.root.after(300, self.poll_queue)
 
         def append_output(self, text: str) -> None:
