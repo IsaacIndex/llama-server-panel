@@ -1,53 +1,63 @@
-# Local llama-server setup
+# Llama Server Panel
 
-This directory runs dedicated `llama-server` processes through cross-platform Python entrypoints:
+Small cross-platform launcher and GUI for running local `llama-server` roles:
 
-- Chat API on `127.0.0.1:8080` with the configured `CHAT_MODEL`
-- Embeddings API on `127.0.0.1:8081` with the configured `EMBED_MODEL`
-- Vision chat API on `127.0.0.1:8082` with the configured `VISION_MODEL` and `VISION_MMPROJ`
+- chat completions on `127.0.0.1:8080`
+- embeddings on `127.0.0.1:8081`
+- vision chat on `127.0.0.1:8082`
+- optional juggler or single gateway for machines that cannot keep every model resident at once
 
-The checked-in `.sh` commands now work on macOS/Linux without requiring `zsh`, and matching `.cmd` launchers are available for Windows.
+The project is intentionally script-driven. Python owns configuration, process launch, model juggling, and the lightweight Tk GUI. The top-level `.sh` and `.cmd` files are convenience launchers for macOS/Linux and Windows.
 
 ## Prerequisites
 
-- Python 3
-- `llama-server` installed either on `PATH` or at `LLAMA_SERVER_BIN`
-- the configured GGUF model files
+- Python 3.10 or newer
+- `llama-server` installed on `PATH`, or `LLAMA_SERVER_BIN` set in a local override file
+- GGUF model files matching your local configuration
+- Tk support in your Python installation when using the GUI
 
-## Model locations
+Model files are not included in this repository.
 
-Place the files here:
+## Configuration
 
-- `~/models/Mistral-Small-3.2-24B-Instruct-2506-BF16.gguf`
-- `~/models/Qwen3-Embedding-4B-Q6_K.gguf`
-- `~/models/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf`
-- the `VISION_MMPROJ` path configured by your local overrides
+Default paths are repo-local:
 
-Defaults are mirrored from `env.sh`: model files under `$HOME/models` and logs under `./logs`.
+- models: `./models`
+- logs: `./logs`
+- llama binary: `llama-server`
 
-For machine-specific paths, ports, or binary locations, create one of these ignored local override files in the repo root:
+Create an ignored local override when your machine uses different paths, ports, models, or binary locations:
 
 - `env.local.env` for portable `KEY=value` overrides
 - `env.local.json` for structured overrides
 - `env.local.sh` for legacy simple `export KEY=value` overrides
+- `env.local.gui.json` for overrides saved by the GUI
+
+Start from the example file:
+
+```sh
+cp .env.example env.local.env
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example env.local.env
+```
 
 Configuration is applied in this order:
 
-1. built-in defaults mirrored from `env.sh`
+1. built-in defaults
 2. current process environment
 3. `env.local.env`
 4. `env.local.json`
 5. `env.local.sh`
-6. the role-specific tune file under `bench-results/tuned/`, if present
+6. `env.local.gui.json`
+7. the role-specific tune file under `bench-results/tuned/`, if present
 
-For embeddings, `start-embed.sh` also forwards:
+Relative model paths are resolved under `MODEL_DIR`. For example, `VISION_MMPROJ=mmproj-model.gguf` resolves to `./models/mmproj-model.gguf` with the default `MODEL_DIR`.
 
-- `EMBED_BATCH_SIZE` as `llama-server --batch-size` (logical batch limit)
-- `EMBED_UBATCH_SIZE` as `llama-server --ubatch-size` (physical per-input token limit)
-
-With the current defaults, a single embedding input that tokenizes past `EMBED_UBATCH_SIZE` tokens will fail even if the request contains only one text. The client should trim or split oversized inputs before calling `/v1/embeddings`.
-
-## Start manually
+## Run
 
 macOS/Linux:
 
@@ -67,9 +77,27 @@ Windows:
 
 The direct launchers delegate to `scripts/llama_role_command.py`, which is the shared source of truth for role-specific `llama-server` arguments.
 
-## Juggle full-context models
+## GUI
 
-Use the juggler when you need all three APIs to be callable but cannot keep chat and vision resident at the same time. The juggler keeps embeddings always on when possible, and switches between chat and vision on demand while preserving each role's individual settings and full context window.
+Run the local GUI to select paths, import GGUF models, assign role models, start roles, and run the juggler.
+
+macOS/Linux:
+
+```sh
+./start-gui.sh
+```
+
+Windows:
+
+```powershell
+.\start-gui.cmd
+```
+
+The GUI uses Python's standard Tk toolkit and the same runtime helpers as the CLI launchers. It saves machine-local choices to ignored `env.local.gui.json`.
+
+## Juggler
+
+Use the juggler when all three APIs should be callable but the machine cannot keep chat and vision resident at the same time. Embeddings stay available when possible; chat and vision are switched on demand.
 
 macOS/Linux:
 
@@ -83,7 +111,7 @@ Windows:
 .\juggle-models.cmd
 ```
 
-Dry-run the resolved ports and backend commands without starting models:
+Dry-run the resolved ports and backend commands:
 
 ```sh
 ./juggle-models.sh --dry-run
@@ -105,21 +133,15 @@ Validate configured files without starting the proxy:
 
 Default public endpoints:
 
-- Chat: `http://127.0.0.1:8080/v1` when port `8080` is free; otherwise `http://127.0.0.1:18080/v1`
-- Embeddings: `http://127.0.0.1:8081/v1`
-- Vision: `http://127.0.0.1:8082/v1`
+- chat: `http://127.0.0.1:8080/v1`, or `http://127.0.0.1:18080/v1` when port `8080` is already in use
+- embeddings: `http://127.0.0.1:8081/v1`
+- vision: `http://127.0.0.1:8082/v1`
 
 Default supervised backend ports:
 
-- Chat backend: `18180`
-- Embedding backend: `18181`
-- Vision backend: `18182`
-
-If HKJC FastAPI or Podman is already occupying host port `8080`, the juggler falls chat back to `18080`. In that case use:
-
-```sh
-LLAMA_SERVER_CHAT_BASE_URL_DOCKER=http://host.docker.internal:18080/v1
-```
+- chat backend: `18180`
+- embedding backend: `18181`
+- vision backend: `18182`
 
 Useful juggler overrides:
 
@@ -131,9 +153,9 @@ Useful juggler overrides:
 - `JUGGLE_STARTUP_TIMEOUT_SECONDS=900`
 - `JUGGLE_REQUEST_TIMEOUT_SECONDS=3600`
 
-## Share as a nearby service
+## Service Gateway
 
-Use the service gateway when another nearby laptop should call this llama setup through one OpenAI-compatible base URL. This is intended for a trusted direct/private link; it does not configure networking, TLS, or API-key auth.
+The service gateway exposes one OpenAI-compatible base URL that routes chat, embedding, and vision requests to the right local role.
 
 macOS/Linux:
 
@@ -147,13 +169,10 @@ Windows:
 .\start-service.cmd
 ```
 
-The gateway listens on `0.0.0.0:8088` by default and keeps supervised llama backends on `127.0.0.1`. It prints local IPv4 client URL candidates and prefers link-local or bridge-style addresses when they are available.
-
-On the other laptop, use the printed direct-link URL:
+The gateway listens on `0.0.0.0:8088` by default and keeps supervised backends on `127.0.0.1`. It does not configure TLS or API-key enforcement. Use it only on a trusted private network, or bind it to localhost:
 
 ```sh
-export OPENAI_BASE_URL=http://<printed-ip>:8088/v1
-export OPENAI_API_KEY=local
+./start-service.sh --bind 127.0.0.1
 ```
 
 Gateway routing:
@@ -181,9 +200,9 @@ Useful service commands:
 Useful service overrides:
 
 - `SERVICE_GATEWAY_PORT=8088`
-- `SERVICE_GATEWAY_BIND=0.0.0.0`
+- `SERVICE_GATEWAY_BIND=127.0.0.1`
 
-## Benchmark and auto-tune
+## Benchmark and Auto-Tune
 
 Auto-tune writes per-role overrides under `bench-results/tuned/`:
 
@@ -211,11 +230,11 @@ Run the generic benchmark harness with:
 .\benchmark.cmd model1.gguf model2.gguf
 ```
 
-## Quick test
+## Quick API Checks
 
 Chat:
 
-```zsh
+```sh
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
@@ -229,7 +248,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 Embeddings:
 
-```zsh
+```sh
 curl http://127.0.0.1:8081/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{
@@ -240,7 +259,7 @@ curl http://127.0.0.1:8081/v1/embeddings \
 
 Vision chat:
 
-```zsh
+```sh
 curl http://127.0.0.1:8082/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
@@ -254,31 +273,57 @@ curl http://127.0.0.1:8082/v1/chat/completions \
   }'
 ```
 
-## macOS launchd
+## Test
 
-Load the agents after the model files exist:
+Run the local validation used by CI:
 
-```zsh
-launchctl load ~/Library/LaunchAgents/com.example.llama-chat.plist
-launchctl load ~/Library/LaunchAgents/com.example.llama-embed.plist
+```sh
+python -m compileall scripts
+python -m unittest discover -s tests
+python scripts/llama_role_command.py --help
+python scripts/model_juggler.py --help
 ```
 
-Restart after config changes:
+## Build Executables
 
-```zsh
-launchctl unload ~/Library/LaunchAgents/com.example.llama-chat.plist
-launchctl unload ~/Library/LaunchAgents/com.example.llama-embed.plist
-launchctl load ~/Library/LaunchAgents/com.example.llama-chat.plist
-launchctl load ~/Library/LaunchAgents/com.example.llama-embed.plist
+Install build dependencies, then build the executable archive for the current platform:
+
+```sh
+python -m pip install -r requirements-build.txt
+python scripts/build_release.py
 ```
 
-Logs:
+The build writes ignored output under:
 
-- direct launch logs are printed by the foreground `start-*.sh` process
-- juggler-supervised backend logs use `./logs/chat-18180.log`, `./logs/embed-18181.log`, and `./logs/vision-18182.log`
+- `build/`
+- `dist/`
+- `release/`
 
-## Note on full-context juggling
+The generated zip contains the GUI executable, `.env.example`, README, license placeholder, and security notes. The source launchers remain available from the repository checkout.
 
-The configured chat and vision context windows are intentionally large: `CHAT_CTX_SIZE=128000` and `VISION_CTX_SIZE=256000`. Running both heavy models at the same time is usually not practical on this laptop once KV cache and runtime overhead are included.
+## Release
 
-The juggler preserves those role-specific settings and trades latency for memory headroom: it keeps embeddings available, then starts either chat or vision on demand and stops the other heavy model before switching.
+GitHub Actions builds downloadable GUI executables for macOS and Windows.
+
+Release from a clean `main` branch:
+
+```sh
+git status --short
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The `Release` workflow runs on `v*` tags, builds macOS and Windows archives, writes SHA256 checksums, and attaches the files to a GitHub release.
+
+Use the manual `workflow_dispatch` trigger when you only want to test packaging artifacts without publishing a release.
+
+## Security Notes
+
+- Do not commit `env.local.*`, `logs/`, `models/`, `bench-results/`, `build/`, `dist/`, or `release/`.
+- Treat model paths, local logs, benchmark outputs, and GUI overrides as machine-local data.
+- The service gateway does not enforce authentication. Do not expose it to untrusted networks.
+- Store real external service keys in your shell environment or ignored local override files.
+
+## License
+
+No open-source license has been selected yet. Add a real license before public release. MIT is a simple option for permissive source distribution; Apache-2.0 is a stronger option when an explicit patent grant matters.

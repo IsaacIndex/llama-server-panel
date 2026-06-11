@@ -21,6 +21,7 @@ ROLE_PREFIX = {
     "embed": "EMBED",
     "vision": "VISION",
 }
+GUI_OVERRIDE_FILE = "env.local.gui.json"
 
 PORT_IN_USE_ERRNOS = {
     errno.EADDRINUSE,
@@ -40,15 +41,12 @@ def repo_dir() -> Path:
 
 
 def default_llama_server_bin() -> str:
-    homebrew_binary = Path("/opt/homebrew/bin/llama-server")
-    if homebrew_binary.exists():
-        return str(homebrew_binary)
     return "llama-server"
 
 
 def default_config(panel_dir: Optional[Path] = None) -> Dict[str, str]:
     panel_dir = (panel_dir or repo_dir()).resolve()
-    model_dir = Path.home() / "models"
+    model_dir = panel_dir / "models"
     return {
         "LLAMA_SERVER_PANEL_DIR": str(panel_dir),
         "LLAMA_SERVER_BIN": default_llama_server_bin(),
@@ -77,7 +75,7 @@ def default_config(panel_dir: Optional[Path] = None) -> Dict[str, str]:
         "EMBED_UBATCH_SIZE": "4096",
         "EMBED_POOLING": "mean",
         "VISION_MODEL": "Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf",
-        "VISION_MMPROJ": str(model_dir / "mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf"),
+        "VISION_MMPROJ": "mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf",
         "VISION_ALIAS": "qwen2.5-vl-3b-instruct",
         "VISION_PORT": "8082",
         "VISION_CTX_SIZE": "256000",
@@ -192,6 +190,7 @@ def load_config(panel_dir: Optional[Path] = None, *, role: Optional[str] = None,
     load_env_assignments(panel_dir / "env.local.env", config)
     load_json_assignments(panel_dir / "env.local.json", config)
     load_env_assignments(panel_dir / "env.local.sh", config)
+    load_json_assignments(panel_dir / GUI_OVERRIDE_FILE, config)
     normalize_config_paths(config)
 
     if role and apply_tune:
@@ -233,7 +232,12 @@ def validate_role_files(role: str, config: Mapping[str, str]) -> None:
     if role == "vision":
         mmproj = Path(config.get("VISION_MMPROJ", ""))
         if not mmproj.is_file():
-            raise PanelError(f"Missing vision mmproj at: {config.get('VISION_MMPROJ', '<unset>')}")
+            raise PanelError(
+                "Missing vision mmproj at: "
+                f"{config.get('VISION_MMPROJ', '<unset>')}. "
+                f"Configured VISION_MODEL is {model_path}. "
+                "Install the matching mmproj file or set VISION_MMPROJ in env.local.sh/env.local.env."
+            )
 
 
 def port_in_use(host: str, port: int) -> bool:

@@ -5,9 +5,9 @@ if [[ -z "${LLAMA_SERVER_PANEL_DIR:-}" ]]; then
 fi
 
 export LLAMA_SERVER_PANEL_DIR
-export LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-/opt/homebrew/bin/llama-server}"
+export LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-llama-server}"
 export LLAMA_HOST="127.0.0.1"
-export MODEL_DIR="${MODEL_DIR:-$HOME/models}"
+export MODEL_DIR="${MODEL_DIR:-$LLAMA_SERVER_PANEL_DIR/models}"
 export LOG_DIR="${LOG_DIR:-$LLAMA_SERVER_PANEL_DIR/logs}"
 
 # export CHAT_MODEL="Qwen3-4B-BF16.gguf"
@@ -42,7 +42,7 @@ export EMBED_UBATCH_SIZE="4096"
 
 
 export VISION_MODEL="Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf"
-export VISION_MMPROJ="/Users/isaac/models/mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf"
+export VISION_MMPROJ="${VISION_MMPROJ:-mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf}"
 export VISION_ALIAS="qwen3vl-30b-a3b-instruct"
 export VISION_PORT="8082"
 export VISION_CTX_SIZE="256000"
@@ -67,3 +67,4 @@ resolve_model_path() {
 export CHAT_MODEL="$(resolve_model_path "$CHAT_MODEL")"
 export EMBED_MODEL="$(resolve_model_path "$EMBED_MODEL")"
 export VISION_MODEL="$(resolve_model_path "$VISION_MODEL")"
+export VISION_MMPROJ="$(resolve_model_path "$VISION_MMPROJ")"

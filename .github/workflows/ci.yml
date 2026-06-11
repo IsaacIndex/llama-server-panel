@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python scripts
+        run: python -m compileall scripts
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Smoke test Python CLIs
+        run: |
+          python scripts/llama_role_command.py --help
+          python scripts/model_juggler.py --help
+
+      - name: Smoke test POSIX launchers
+        if: runner.os != 'Windows'
+        run: |
+          sh start-chat.sh --help
+          sh start-embed.sh --help
+          sh start-vision.sh --help
+          sh start-service.sh --help
+          sh juggle-models.sh --help
+          sh benchmark.sh --help
+
+      - name: Smoke test Windows launchers
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          start-chat.cmd --help
+          start-embed.cmd --help
+          start-vision.cmd --help
+          start-service.cmd --help
+          juggle-models.cmd --help
+          benchmark.cmd --help
