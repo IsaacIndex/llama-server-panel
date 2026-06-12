@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from llama_runtime import (
     PanelError,
     build_role_argv,
+    launch_diagnostics,
     load_config,
     popen_session_kwargs,
     port_in_use as runtime_port_in_use,
@@ -230,9 +231,11 @@ class JugglerState:
             raise StartupError(f"backend port {runtime.host}:{runtime.backend_port} is already in use")
 
         runtime.log_path.parent.mkdir(parents=True, exist_ok=True)
-        argv = helper_argv(role, port=runtime.backend_port, host=runtime.host, auto_tune=self.auto_tune)
         log_fh = open(runtime.log_path, "ab", buffering=0)
         try:
+            log_fh.write(f"[panel] preparing {role} backend on {runtime.host}:{runtime.backend_port}\n".encode("utf-8"))
+            argv = helper_argv(role, port=runtime.backend_port, host=runtime.host, auto_tune=self.auto_tune)
+            log_fh.write(launch_diagnostics(f"{role} backend", argv, cwd=REPO_DIR).encode("utf-8"))
             runtime.process = subprocess.Popen(
                 argv,
                 cwd=str(REPO_DIR),
@@ -240,10 +243,19 @@ class JugglerState:
                 stderr=subprocess.STDOUT,
                 **popen_session_kwargs(),
             )
+            log_fh.write(launch_diagnostics(f"{role} backend", argv, cwd=REPO_DIR, pid=runtime.process.pid).encode("utf-8"))
+        except Exception as exc:
+            log_fh.write(f"[panel] startup failed: {exc}\n".encode("utf-8", errors="replace"))
+            raise
         finally:
             log_fh.close()
 
-        wait_ready(runtime.host, runtime.backend_port, self.startup_timeout)
+        try:
+            wait_ready(runtime.host, runtime.backend_port, self.startup_timeout)
+        except Exception as exc:
+            with runtime.log_path.open("ab", buffering=0) as failure_log_fh:
+                failure_log_fh.write(f"[panel] startup failed: {exc}\n".encode("utf-8", errors="replace"))
+            raise
 
     def stop_process(self, role: str) -> None:
         runtime = self.roles[role]

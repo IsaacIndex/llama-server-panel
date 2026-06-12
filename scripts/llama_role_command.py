@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from typing import Optional
 
@@ -14,7 +13,9 @@ from llama_runtime import (
     load_config,
     port_in_use,
     repo_dir,
+    role_server_log_path,
     role_environment,
+    run_role_argv_with_log,
     validate_role_files,
     write_env0_records,
 )
@@ -83,8 +84,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         host_override=args.host,
         auto_tune=args.auto_tune,
     )
-    completed = subprocess.run(role_argv, cwd=str(panel_dir), check=False)
-    return completed.returncode
+    role_config = load_config(panel_dir, role=args.role)
+    log_path = role_server_log_path(role_config, args.role)
+    print(f"[panel] writing {args.role} llama-server log to {log_path}", file=sys.stderr)
+    return run_role_argv_with_log(args.role, role_argv, panel_dir=panel_dir, log_path=log_path)
 
 
 if __name__ == "__main__":

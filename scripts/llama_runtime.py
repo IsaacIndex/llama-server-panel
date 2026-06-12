@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import errno
 import contextlib
+import errno
 import json
 import os
 import re
@@ -185,6 +185,12 @@ def tune_file_path(config: Mapping[str, str], role: str) -> Path:
     return Path(config["LLAMA_SERVER_PANEL_DIR"]) / "bench-results" / "tuned" / f"{stem}.{role}.sh"
 
 
+def role_server_log_path(config: Mapping[str, str], role: str) -> Path:
+    if role not in ROLE_PREFIX:
+        raise PanelError(f"Unknown role: {role}")
+    return Path(config["LOG_DIR"]) / f"{role}.log"
+
+
 def load_config(panel_dir: Optional[Path] = None, *, role: Optional[str] = None, apply_tune: bool = True) -> Dict[str, str]:
     panel_dir = (panel_dir or repo_dir()).resolve()
     config = default_config(panel_dir)
@@ -293,6 +299,8 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
     tune_log_path.parent.mkdir(parents=True, exist_ok=True)
     auto_tune_script = panel_dir / "scripts" / "auto_tune.py"
     if getattr(sys, "frozen", False):
+        previous_stdout_log = os.environ.get("PANEL_AUTO_TUNE_STDOUT_LOG")
+        os.environ["PANEL_AUTO_TUNE_STDOUT_LOG"] = "1"
         try:
             with tune_log_path.open("a", encoding="utf-8", errors="replace") as log_fh:
                 log_fh.write(launch_diagnostics(f"auto-tune {role}", ["<bundled>", "auto_tune", role], cwd=panel_dir))
@@ -306,8 +314,15 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
                 f"auto-tune failed for {role} while creating {tune_path}. "
                 f"Check {tune_log_path}. Original error: {exc}"
             ) from exc
+        finally:
+            if previous_stdout_log is None:
+                os.environ.pop("PANEL_AUTO_TUNE_STDOUT_LOG", None)
+            else:
+                os.environ["PANEL_AUTO_TUNE_STDOUT_LOG"] = previous_stdout_log
     else:
         argv = [sys.executable, str(auto_tune_script), role]
+        tune_env = os.environ.copy()
+        tune_env["PANEL_AUTO_TUNE_STDOUT_LOG"] = "1"
         with tune_log_path.open("ab", buffering=0) as log_fh:
             log_fh.write(launch_diagnostics(f"auto-tune {role}", argv, cwd=panel_dir).encode("utf-8"))
             proc = subprocess.run(
@@ -316,6 +331,7 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 check=False,
+                env=tune_env,
             )
             returncode = proc.returncode
     if returncode != 0:
@@ -482,6 +498,25 @@ def build_role_argv_for_config(
         ]
 
     raise PanelError(f"Unknown role: {role}")
+
+
+def run_role_argv_with_log(role: str, argv: list[str], *, panel_dir: Path, log_path: Path) -> int:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab", buffering=0) as log_fh:
+        log_fh.write(launch_diagnostics(f"{role} llama-server", argv, cwd=panel_dir).encode("utf-8"))
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(panel_dir),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            **popen_session_kwargs(),
+        )
+        log_fh.write(launch_diagnostics(f"{role} llama-server", argv, cwd=panel_dir, pid=proc.pid).encode("utf-8"))
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            terminate_process(proc)
+            raise
 
 
 def popen_session_kwargs() -> Dict[str, object]:

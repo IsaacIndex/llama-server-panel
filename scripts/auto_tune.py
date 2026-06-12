@@ -20,6 +20,7 @@ from llama_runtime import (
     build_role_argv_for_config,
     cpu_counts,
     host_label,
+    launch_diagnostics,
     load_config,
     popen_session_kwargs,
     port_in_use,
@@ -46,14 +47,34 @@ EMBED_TEXT = (
     "system. The key challenges include fault tolerance, consistency models, distributed consensus, and clock "
     "synchronization. Systems like Bigtable, Dynamo, and Cassandra use consistent hashing for data partitioning."
 )
+TUNE_LOG_PATH: Optional[Path] = None
+
+
+def set_tune_log_path(path: Optional[Path]) -> None:
+    global TUNE_LOG_PATH
+    TUNE_LOG_PATH = path
+
+
+def append_tune_log(line: str) -> None:
+    if TUNE_LOG_PATH is None:
+        return
+    if os.environ.get("PANEL_AUTO_TUNE_STDOUT_LOG") == "1":
+        return
+    TUNE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TUNE_LOG_PATH.open("a", encoding="utf-8", errors="replace") as log_fh:
+        log_fh.write(f"{line}\n")
 
 
 def log(message: str) -> None:
-    print(f"[tune] {message}")
+    line = f"[tune] {message}"
+    print(line)
+    append_tune_log(line)
 
 
 def err(message: str) -> None:
-    print(f"[tune] {message}", file=sys.stderr)
+    line = f"[tune] {message}"
+    print(line, file=sys.stderr)
+    append_tune_log(line)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -178,6 +199,8 @@ def start_server(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "wb")
     try:
+        log_fh.write(f"[panel] candidate log: {log_path}\n".encode("utf-8"))
+        log_fh.write(launch_diagnostics(f"{role} tune candidate", argv, cwd=repo_dir()).encode("utf-8"))
         proc = subprocess.Popen(
             argv,
             cwd=str(repo_dir()),
@@ -226,6 +249,7 @@ def bench_chat_like(
             pass
 
         try:
+            started = time.monotonic()
             response = request_json(
                 "POST",
                 f"http://{host}:{port}/v1/chat/completions",
@@ -236,7 +260,9 @@ def bench_chat_like(
                 },
                 timeout=120,
             )
+            elapsed = time.monotonic() - started
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            err(f"  Chat benchmark request failed (check {log_path})")
             return 0.0
 
         timings = response.get("timings")
@@ -250,6 +276,22 @@ def bench_chat_like(
 
         if score <= 0:
             score = score_from_slots(host, port)
+        if score <= 0:
+            usage = response.get("usage")
+            completion_tokens = 0
+            if isinstance(usage, dict):
+                try:
+                    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                except (TypeError, ValueError):
+                    completion_tokens = 0
+            if completion_tokens > 0 and elapsed > 0:
+                score = completion_tokens / elapsed
+                log(
+                    "  response did not include llama.cpp timings; "
+                    f"estimated {score:.2f} tok/s from {completion_tokens} completion tokens over {elapsed:.2f}s"
+                )
+            else:
+                err(f"  Chat benchmark response had no positive timings or token usage (check {log_path})")
         return score
     finally:
         terminate_process(proc)
@@ -338,6 +380,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     startup_timeout = int(os.environ.get("TUNE_STARTUP_TIMEOUT", "120"))
     tune_dir = panel_dir / "bench-results" / "tuned"
     log_path = tune_dir / "server-tune.log"
+    set_tune_log_path(log_path)
+    log(f"Run log: {log_path}")
 
     if port_in_use(tune_host, tune_port):
         raise PanelError(f"Port {tune_host}:{tune_port} is in use. Set TUNE_PORT to a different value.")
@@ -360,7 +404,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         for threads in candidates:
             for cache_k, cache_v in cache_combos:
                 current += 1
+                candidate_log_path = tune_dir / (
+                    f"{Path(config[f'{prefix}_MODEL']).stem}.{args.role}."
+                    f"candidate-{current:02d}-threads-{threads}-k-{cache_k}-v-{cache_v}.log"
+                )
                 log(f"[{current}/{total_runs}] threads={threads} cache_k={cache_k} cache_v={cache_v}")
+                log(f"  candidate log: {candidate_log_path}")
                 score = bench_chat_like(
                     args.role,
                     config,
@@ -369,7 +418,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     threads=threads,
                     cache_k=cache_k,
                     cache_v=cache_v,
-                    log_path=log_path,
+                    log_path=candidate_log_path,
                     prompt=BENCH_PROMPT if args.role == "chat" else VISION_BENCH_PROMPT,
                     startup_timeout=startup_timeout,
                 )
@@ -382,10 +431,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         log(f"Best: threads={best_threads} cache_k={best_cache_k} cache_v={best_cache_v} ({best_score:.2f} tok/s)")
         if best_score <= 0:
-            raise PanelError(
+            message = (
                 f"No working {args.role} tuning configuration started. "
-                f"Check {log_path}; lowering {prefix}_CTX_SIZE may be required."
+                f"Check {log_path} and candidate logs under {tune_dir}; lowering {prefix}_CTX_SIZE may be required."
             )
+            err(message)
+            raise PanelError(message)
         prefix = "CHAT" if args.role == "chat" else "VISION"
         write_tune_file(
             args.role,
@@ -403,13 +454,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     total_runs = len(candidates)
     for index, threads in enumerate(candidates, start=1):
+        candidate_log_path = tune_dir / f"{Path(config[f'{prefix}_MODEL']).stem}.{args.role}.candidate-{index:02d}-threads-{threads}.log"
         log(f"[{index}/{total_runs}] threads={threads}")
+        log(f"  candidate log: {candidate_log_path}")
         score = bench_embed(
             config,
             host=tune_host,
             port=tune_port,
             threads=threads,
-            log_path=log_path,
+            log_path=candidate_log_path,
             startup_timeout=startup_timeout,
         )
         log(f"  -> {score:.2f} req/s")
@@ -419,10 +472,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     log(f"Best: threads={best_threads} ({best_score:.2f} req/s)")
     if best_score <= 0:
-        raise PanelError(
+        message = (
             f"No working {args.role} tuning configuration started. "
-            f"Check {log_path}; lowering EMBED_CTX_SIZE may be required."
+            f"Check {log_path} and candidate logs under {tune_dir}; lowering EMBED_CTX_SIZE may be required."
         )
+        err(message)
+        raise PanelError(message)
     write_tune_file(
         args.role,
         config,

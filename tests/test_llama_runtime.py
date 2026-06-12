@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts import llama_runtime
-from scripts.llama_runtime import PanelError, default_config, ensure_llama_server_binary, launch_diagnostics, load_config, popen_session_kwargs
+from scripts.llama_runtime import (
+    PanelError,
+    default_config,
+    ensure_llama_server_binary,
+    launch_diagnostics,
+    load_config,
+    popen_session_kwargs,
+    role_server_log_path,
+    run_role_argv_with_log,
+)
 
 
 class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
@@ -57,6 +67,34 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
         self.assertIn("command:", message)
         self.assertIn("llama-server", message)
         self.assertIn("pid: 123", message)
+
+    def test_role_server_log_path_is_per_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"LOG_DIR": tmp}
+
+            self.assertEqual(role_server_log_path(config, "chat"), Path(tmp) / "chat.log")
+            self.assertEqual(role_server_log_path(config, "embed"), Path(tmp) / "embed.log")
+            self.assertEqual(role_server_log_path(config, "vision"), Path(tmp) / "vision.log")
+            with self.assertRaisesRegex(PanelError, "Unknown role"):
+                role_server_log_path(config, "rerank")
+
+    def test_run_role_argv_with_log_captures_output_and_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_path = panel_dir / "logs" / "chat.log"
+
+            returncode = run_role_argv_with_log(
+                "chat",
+                [sys.executable, "-c", "print('server output')"],
+                panel_dir=panel_dir,
+                log_path=log_path,
+            )
+
+            self.assertEqual(returncode, 0)
+            text = log_path.read_text(encoding="utf-8")
+            self.assertIn("launching chat llama-server", text)
+            self.assertIn("started chat llama-server", text)
+            self.assertIn("server output", text)
 
     def test_ensure_llama_server_binary_rejects_panel_launcher_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -76,6 +76,7 @@ Windows:
 ```
 
 The direct launchers delegate to `scripts/llama_role_command.py`, which is the shared source of truth for role-specific `llama-server` arguments.
+Direct role launches write the server process output to `LOG_DIR/<role>.log`, for example `logs/chat.log`.
 
 ## GUI
 
@@ -217,6 +218,8 @@ Auto-tune writes per-role overrides under `bench-results/tuned/`:
 .\auto-tune.cmd embed
 .\auto-tune.cmd vision
 ```
+
+Auto-tune writes the sweep summary to `bench-results/tuned/server-tune.log` and each candidate server attempt to a separate `bench-results/tuned/*.candidate-*.log` file. If tuning fails with `No working ... tuning configuration started`, check the run log first, then the candidate logs for the llama.cpp startup or memory-fit failure.
 
 Run the generic benchmark harness with:
 
