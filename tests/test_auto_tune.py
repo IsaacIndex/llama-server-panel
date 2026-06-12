@@ -23,7 +23,11 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
     def test_wait_for_server_stops_when_process_exits(self) -> None:
         proc = SimpleNamespace(returncode=42, poll=lambda: 42)
 
-        with patch("auto_tune.request_json") as request_json, patch("auto_tune.time.sleep") as sleep:
+        with (
+            patch("auto_tune.err"),
+            patch("auto_tune.request_json") as request_json,
+            patch("auto_tune.time.sleep") as sleep,
+        ):
             self.assertFalse(auto_tune.wait_for_server("127.0.0.1", 9998, 120, proc=proc))
 
         request_json.assert_not_called()
@@ -55,6 +59,7 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
                 patch("auto_tune.terminate_process") as terminate_process,
                 patch("auto_tune.request_json") as request_json,
                 patch("auto_tune.time.sleep") as sleep,
+                patch("auto_tune.err"),
             ):
                 self.assertFalse(auto_tune.wait_for_server("127.0.0.1", 9998, 120, proc=proc, log_path=log_path))
 
@@ -77,6 +82,7 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
             patch("auto_tune.cpu_counts", return_value=(10, 6)),
             patch("auto_tune.thread_candidates", return_value=[2]),
             patch("auto_tune.bench_chat_like", return_value=0.0),
+            patch("auto_tune.log"),
         ):
             with self.assertRaisesRegex(PanelError, "No working chat tuning configuration"):
                 auto_tune.main(["chat"])

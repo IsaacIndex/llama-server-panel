@@ -257,7 +257,7 @@ class PanelGuiHelpersTest(unittest.TestCase):
 
             self.assertIn("No log yet", tail_file_text(log_path, max_bytes=8))
 
-            log_path.write_text("first line\nsecond line\n", encoding="utf-8")
+            log_path.write_bytes(b"first line\nsecond line\n")
             self.assertEqual(tail_file_text(log_path, max_bytes=128), "first line\nsecond line\n")
 
             self.assertEqual(
