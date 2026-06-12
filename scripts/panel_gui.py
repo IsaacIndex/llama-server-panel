@@ -401,6 +401,10 @@ def role_log_path(config: Mapping[str, str], role: str) -> Path:
     return Path(config["LOG_DIR"]) / f"{role}-gui.log"
 
 
+def auto_tune_log_path(panel_dir: Path) -> Path:
+    return panel_dir / "bench-results" / "tuned" / "server-tune.log"
+
+
 def tail_file_text(path: Path, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
     try:
         size = path.stat().st_size
@@ -415,6 +419,21 @@ def tail_file_text(path: Path, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
         else:
             prefix = ""
         return prefix + fh.read().decode("utf-8", errors="replace")
+
+
+def role_log_display_text(config: Mapping[str, str], role: str, *, panel_dir: Path, max_bytes: int = LOG_TAIL_BYTES) -> str:
+    log_path = role_log_path(config, role)
+    sections = [
+        f"== {ROLE_LABELS[role]} GUI/server log: {log_path} ==\n"
+        f"{tail_file_text(log_path, max_bytes=max_bytes)}"
+    ]
+    tune_path = auto_tune_log_path(panel_dir)
+    if tune_path.is_file():
+        sections.append(
+            f"== Auto-tune log: {tune_path} ==\n"
+            f"{tail_file_text(tune_path, max_bytes=max_bytes)}"
+        )
+    return "\n".join(sections)
 
 
 def process_running(proc: Optional[subprocess.Popen[bytes]]) -> bool:
@@ -1085,9 +1104,15 @@ def run_gui() -> int:
                 port = int(config[f"{prefix}_PORT"])
                 if port_in_use(host, port):
                     raise PanelError(f"Port {host}:{port} is already in use.")
-                argv = build_role_argv(role, panel_dir=self.panel_dir, auto_tune=self.auto_tune.get())
                 log_path = role_log_path(config, role)
                 log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("ab", buffering=0) as log_fh:
+                    message = f"[panel] preparing {role} launch"
+                    if self.auto_tune.get() and not tune_file_exists(role, self.panel_dir):
+                        message += f"; auto-tune output is written to {auto_tune_log_path(self.panel_dir)}"
+                    log_fh.write(f"{message}\n".encode("utf-8"))
+
+                argv = build_role_argv(role, panel_dir=self.panel_dir, auto_tune=self.auto_tune.get())
                 log_fh = open(log_path, "ab", buffering=0)
                 try:
                     log_fh.write(launch_diagnostics(ROLE_LABELS[role], argv, cwd=self.panel_dir).encode("utf-8"))
@@ -1282,7 +1307,7 @@ def run_gui() -> int:
                     self.replace_log_text(text, f"Could not load log configuration: {exc}\n")
                 return
             for role, text in self.log_texts.items():
-                self.replace_log_text(text, tail_file_text(role_log_path(config, role)))
+                self.replace_log_text(text, role_log_display_text(config, role, panel_dir=self.panel_dir))
 
         def refresh_logs(self) -> None:
             try:

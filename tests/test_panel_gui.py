@@ -30,6 +30,7 @@ from panel_gui import (
     model_dir_from_value,
     model_config_value,
     post_json,
+    role_log_display_text,
     role_log_path,
     save_gui_overrides,
     start_status_for_auto_tune,
@@ -264,6 +265,35 @@ class PanelGuiHelpersTest(unittest.TestCase):
                 tail_file_text(log_path, max_bytes=6),
                 f"... showing last 6 bytes of {log_path}\n\n line\n",
             )
+
+    def test_role_log_display_includes_role_and_auto_tune_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            tune_dir = panel_dir / "bench-results" / "tuned"
+            log_dir.mkdir()
+            tune_dir.mkdir(parents=True)
+            (log_dir / "chat-gui.log").write_text("server startup\n", encoding="utf-8")
+            (tune_dir / "server-tune.log").write_text("auto tune candidate\n", encoding="utf-8")
+
+            text = role_log_display_text({"LOG_DIR": str(log_dir)}, "chat", panel_dir=panel_dir)
+
+            self.assertIn("Chat GUI/server log", text)
+            self.assertIn("server startup", text)
+            self.assertIn("Auto-tune log", text)
+            self.assertIn("auto tune candidate", text)
+
+    def test_role_log_display_omits_missing_auto_tune_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            log_dir.mkdir()
+            (log_dir / "chat-gui.log").write_text("server startup\n", encoding="utf-8")
+
+            text = role_log_display_text({"LOG_DIR": str(log_dir)}, "chat", panel_dir=panel_dir)
+
+            self.assertIn("server startup", text)
+            self.assertNotIn("Auto-tune log", text)
 
 
 if __name__ == "__main__":
