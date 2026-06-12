@@ -48,11 +48,12 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
             self.assertEqual(popen_session_kwargs(), {"start_new_session": True})
 
     def test_launch_diagnostics_includes_command_context(self) -> None:
-        message = launch_diagnostics("Chat", ["llama-server", "--model", "chat.gguf"], cwd=Path("/tmp/panel"), pid=123)
+        cwd = Path("/tmp/panel")
+        message = launch_diagnostics("Chat", ["llama-server", "--model", "chat.gguf"], cwd=cwd, pid=123)
 
         self.assertIn("[panel]", message)
         self.assertIn("started Chat", message)
-        self.assertIn("cwd: /tmp/panel", message)
+        self.assertIn(f"cwd: {cwd}", message)
         self.assertIn("command:", message)
         self.assertIn("llama-server", message)
         self.assertIn("pid: 123", message)
