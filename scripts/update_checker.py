@@ -8,7 +8,6 @@ import hashlib
 import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,7 +26,9 @@ VERSION_ENV = "LLAMA_SERVER_PANEL_VERSION"
 VERSION_FILE_NAME = "VERSION"
 GITHUB_RELEASES_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases"
 REQUEST_TIMEOUT_SECONDS = 8
+DOWNLOAD_CHUNK_SIZE = 1024 * 256
 VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)")
+ProgressCallback = Callable[[str], None]
 
 
 class UpdateCheckError(Exception):
@@ -240,12 +241,21 @@ def find_release_asset(release: LatestRelease, asset_name: str) -> Optional[Rele
     return None
 
 
+def format_byte_count(value: int) -> str:
+    if value >= 1024 * 1024:
+        return f"{value / (1024 * 1024):.1f} MB"
+    if value >= 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value} bytes"
+
+
 def download_url(
     url: str,
     destination: Path,
     *,
     timeout: int = REQUEST_TIMEOUT_SECONDS,
     opener: Optional[Callable[..., object]] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> None:
     request = urllib.request.Request(
         url,
@@ -255,7 +265,21 @@ def download_url(
     try:
         with urlopen(request, timeout=timeout) as response:
             with destination.open("wb") as output:
-                shutil.copyfileobj(response, output)
+                total = int(response.headers.get("Content-Length", "0") or 0)
+                downloaded = 0
+                next_report = 0
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    downloaded += len(chunk)
+                    if progress is not None and downloaded >= next_report:
+                        if total:
+                            progress(f"Downloaded {format_byte_count(downloaded)} of {format_byte_count(total)}")
+                        else:
+                            progress(f"Downloaded {format_byte_count(downloaded)}")
+                        next_report = downloaded + 1024 * 1024
     except urllib.error.HTTPError as exc:
         raise UpdateCheckError(f"Download failed with HTTP {exc.code}: {url}") from exc
     except urllib.error.URLError as exc:
@@ -309,6 +333,7 @@ def download_update_archive(
     destination_dir: Path,
     *,
     opener: Optional[Callable[..., object]] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> Path:
     archive_name = expected_archive_name()
     archive_asset = find_release_asset(release, archive_name)
@@ -316,12 +341,18 @@ def download_update_archive(
         raise UpdateCheckError(f"Latest release does not include {archive_name}. Download manually: {release.html_url}")
 
     archive_path = destination_dir / archive_name
-    download_url(archive_asset.browser_download_url, archive_path, opener=opener)
+    if progress is not None:
+        progress(f"Downloading {archive_name}...")
+    download_url(archive_asset.browser_download_url, archive_path, opener=opener, progress=progress)
 
     checksum_asset = find_release_asset(release, f"{archive_name}.sha256")
     if checksum_asset is not None:
         checksum_path = destination_dir / checksum_asset.name
+        if progress is not None:
+            progress(f"Downloading checksum {checksum_asset.name}...")
         download_url(checksum_asset.browser_download_url, checksum_path, opener=opener)
+        if progress is not None:
+            progress("Verifying update checksum...")
         verify_archive_checksum(archive_path, checksum_path.read_text(encoding="utf-8"), archive_name)
     return archive_path
 
@@ -390,6 +421,7 @@ def apply_update(
     panel_dir: Path,
     *,
     opener: Optional[Callable[..., object]] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> UpdateInstallResult:
     if not result.update_available:
         raise UpdateCheckError("No update is available to install.")
@@ -399,10 +431,14 @@ def apply_update(
     executable = Path(sys.executable).resolve()
     install_dir = executable.parent
     work_dir = Path(tempfile.mkdtemp(prefix="llama-panel-update-"))
-    archive_path = download_update_archive(result.latest, work_dir, opener=opener)
+    archive_path = download_update_archive(result.latest, work_dir, opener=opener, progress=progress)
     extract_dir = work_dir / "extracted"
     extract_dir.mkdir()
+    if progress is not None:
+        progress("Extracting update archive...")
     extract_update_archive(archive_path, extract_dir)
+    if progress is not None:
+        progress("Starting installer helper...")
     start_installer_process(extract_dir, install_dir, executable)
     return UpdateInstallResult(
         version=result.latest.tag_name,

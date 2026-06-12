@@ -1241,7 +1241,11 @@ def run_gui() -> int:
 
         def _apply_update_worker(self, result: UpdateCheckResult) -> None:
             try:
-                install_result = apply_update(result, self.panel_dir)
+                install_result = apply_update(
+                    result,
+                    self.panel_dir,
+                    progress=lambda message: self.queue.put(("update_install_progress", message)),
+                )
                 self.queue.put(("update_install_result", install_result))
             except Exception as exc:
                 self.queue.put(("update_install_error", str(exc)))
@@ -1344,6 +1348,8 @@ def run_gui() -> int:
                     message = str(payload)
                     self.append_output(f"Update install failed: {message}\n")
                     messagebox.showerror("Update install failed", message)
+                elif kind == "update_install_progress":
+                    self.append_output(f"{payload}\n")
                 elif kind == "api_test_result":
                     title, message, test_type = payload
                     if test_type == "chat":

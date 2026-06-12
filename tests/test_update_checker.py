@@ -19,15 +19,18 @@ from update_checker import (
     ReleaseAsset,
     UpdateCheckError,
     VersionSource,
+    _installer_script_contents,
     build_update_result,
     check_for_updates,
     compare_versions,
     current_app_version,
+    download_url,
     download_update_archive,
     executable_name,
     expected_archive_name,
     extract_update_archive,
     fetch_latest_release,
+    format_byte_count,
     parse_latest_release,
     parse_checksum_file,
     resolve_update_repo,
@@ -36,8 +39,9 @@ from update_checker import (
 
 
 class FakeResponse:
-    def __init__(self, body: bytes) -> None:
+    def __init__(self, body: bytes, *, headers: dict[str, str] | None = None) -> None:
         self.body = body
+        self.headers = headers or {}
         self.offset = 0
 
     def __enter__(self) -> "FakeResponse":
@@ -163,6 +167,25 @@ class UpdateCheckerTest(unittest.TestCase):
         with self.assertRaises(UpdateCheckError):
             fetch_latest_release("IsaacIndex/llama-server-panel", opener=lambda request, timeout: FakeResponse(b"[]"))
 
+    def test_format_byte_count_reports_human_readable_values(self) -> None:
+        self.assertEqual(format_byte_count(512), "512 bytes")
+        self.assertEqual(format_byte_count(1536), "1.5 KB")
+        self.assertEqual(format_byte_count(2 * 1024 * 1024), "2.0 MB")
+
+    def test_download_url_streams_chunks_and_reports_progress(self) -> None:
+        progress: list[str] = []
+
+        def opener(request: object, timeout: int) -> FakeResponse:
+            self.assertEqual(timeout, 8)
+            return FakeResponse(b"abc123", headers={"Content-Length": "6"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "download.bin"
+            download_url("https://example.test/download.bin", destination, opener=opener, progress=progress.append)
+
+            self.assertEqual(destination.read_bytes(), b"abc123")
+            self.assertIn("Downloaded 6 bytes of 6 bytes", progress)
+
     def test_download_update_archive_selects_platform_asset_and_verifies_checksum(self) -> None:
         archive_name = expected_archive_name()
         archive_bytes = b"archive bytes"
@@ -230,6 +253,20 @@ class UpdateCheckerTest(unittest.TestCase):
 
             with self.assertRaisesRegex(UpdateCheckError, executable_name()):
                 extract_update_archive(archive_path, root / "extracted")
+
+    def test_installer_script_contents_windows_has_wait_copy_and_restart(self) -> None:
+        with patch("update_checker.os.name", "nt"):
+            script = _installer_script_contents()
+
+        self.assertIn("@echo off", script)
+        self.assertIn('set "PID=%~1"', script)
+        self.assertIn('set "SOURCE_DIR=%~2"', script)
+        self.assertIn('set "INSTALL_DIR=%~3"', script)
+        self.assertIn('set "EXE_PATH=%~4"', script)
+        self.assertIn('tasklist /FI "PID eq %PID%"', script)
+        self.assertIn("timeout /t 1 /nobreak >nul", script)
+        self.assertIn('if exist "%SOURCE_DIR%\\llama-server-panel.exe" copy /Y', script)
+        self.assertIn('start "" "%EXE_PATH%"', script)
 
     def test_resolve_update_repo_rejects_invalid_override(self) -> None:
         with self.assertRaises(UpdateCheckError):
