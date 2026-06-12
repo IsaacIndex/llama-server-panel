@@ -23,6 +23,7 @@ from llama_runtime import (
     GUI_OVERRIDE_FILE,
     PanelError,
     build_role_argv,
+    launch_diagnostics,
     load_config,
     popen_session_kwargs,
     port_in_use,
@@ -1089,6 +1090,7 @@ def run_gui() -> int:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_fh = open(log_path, "ab", buffering=0)
                 try:
+                    log_fh.write(launch_diagnostics(ROLE_LABELS[role], argv, cwd=self.panel_dir).encode("utf-8"))
                     proc = subprocess.Popen(
                         argv,
                         cwd=str(self.panel_dir),
@@ -1096,6 +1098,10 @@ def run_gui() -> int:
                         stderr=subprocess.STDOUT,
                         **popen_session_kwargs(),
                     )
+                    log_fh.write(launch_diagnostics(ROLE_LABELS[role], argv, cwd=self.panel_dir, pid=proc.pid).encode("utf-8"))
+                except Exception as exc:
+                    log_fh.write(f"[panel] launch failed: {exc}\n".encode("utf-8", errors="replace"))
+                    raise
                 finally:
                     log_fh.close()
                 self.queue.put(("role_started", (role, proc, log_path)))

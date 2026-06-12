@@ -108,7 +108,7 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
             )
 
             completed = SimpleNamespace(returncode=7)
-            with patch("llama_runtime.subprocess.run", return_value=completed):
+            with patch("llama_runtime.subprocess.run", return_value=completed) as run:
                 with self.assertRaises(PanelError) as ctx:
                     llama_runtime.ensure_tune_file("chat", panel_dir)
 
@@ -116,6 +116,42 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
             self.assertIn("auto-tune failed for chat", message)
             self.assertIn("chat.chat.sh", message)
             self.assertIn("server-tune.log", message)
+            run.assert_called_once()
+            self.assertIn("launching auto-tune chat", (panel_dir / "bench-results" / "tuned" / "server-tune.log").read_text(encoding="utf-8"))
+
+    def test_ensure_tune_file_uses_bundled_auto_tune_when_frozen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            model_dir = panel_dir / "models"
+            model_dir.mkdir()
+            binary = panel_dir / "llama-server"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            model = model_dir / "chat.gguf"
+            model.write_text("model", encoding="utf-8")
+            (panel_dir / "env.local.json").write_text(
+                json.dumps(
+                    {
+                        "LLAMA_SERVER_BIN": str(binary),
+                        "MODEL_DIR": str(model_dir),
+                        "CHAT_MODEL": model.name,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(llama_runtime.sys, "frozen", True, create=True),
+                patch("llama_runtime.subprocess.run") as run,
+                patch("auto_tune.main", return_value=0) as auto_tune_main,
+            ):
+                llama_runtime.ensure_tune_file("chat", panel_dir)
+
+            run.assert_not_called()
+            auto_tune_main.assert_called_once_with(["chat"])
+            tune_log = (panel_dir / "bench-results" / "tuned" / "server-tune.log").read_text(encoding="utf-8")
+            self.assertIn("launching auto-tune chat", tune_log)
+            self.assertIn("<bundled>", tune_log)
+            self.assertIn("auto_tune", tune_log)
 
 
 if __name__ == "__main__":

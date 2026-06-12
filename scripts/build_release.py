@@ -53,6 +53,8 @@ def run_pyinstaller() -> Path:
         "--noconfirm",
         "--onefile",
         "--hidden-import",
+        "auto_tune",
+        "--hidden-import",
         "tkinter",
         "--hidden-import",
         "tkinter.ttk",

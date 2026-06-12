@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import errno
+import contextlib
 import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, MutableMapping, Optional
 
@@ -216,6 +219,18 @@ def ensure_llama_server_binary(config: Mapping[str, str]) -> str:
     binary = config["LLAMA_SERVER_BIN"]
     resolved = resolve_executable(binary)
     if resolved:
+        resolved_path = Path(resolved)
+        if resolved_path.suffix.lower() in {".cmd", ".bat"} and resolved_path.stem.lower() in {
+            "start-chat",
+            "start-embed",
+            "start-vision",
+            "start-gui",
+            "llama_role_command",
+        }:
+            raise PanelError(
+                "LLAMA_SERVER_BIN must point to the llama-server executable, "
+                f"not the panel launcher script: {resolved_path}"
+            )
         return resolved
     raise PanelError(f"Missing llama-server binary at: {binary}")
 
@@ -274,16 +289,39 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
         return
 
     validate_role_files(role, config)
+    tune_log_path = panel_dir / "bench-results" / "tuned" / "server-tune.log"
+    tune_log_path.parent.mkdir(parents=True, exist_ok=True)
     auto_tune_script = panel_dir / "scripts" / "auto_tune.py"
-    proc = subprocess.run(
-        [sys.executable, str(auto_tune_script), role],
-        cwd=str(panel_dir),
-        check=False,
-    )
-    if proc.returncode != 0:
+    if getattr(sys, "frozen", False):
+        try:
+            with tune_log_path.open("a", encoding="utf-8", errors="replace") as log_fh:
+                log_fh.write(launch_diagnostics(f"auto-tune {role}", ["<bundled>", "auto_tune", role], cwd=panel_dir))
+                log_fh.flush()
+                with contextlib.redirect_stdout(log_fh), contextlib.redirect_stderr(log_fh):
+                    import auto_tune
+
+                    returncode = auto_tune.main([role])
+        except Exception as exc:
+            raise PanelError(
+                f"auto-tune failed for {role} while creating {tune_path}. "
+                f"Check {tune_log_path}. Original error: {exc}"
+            ) from exc
+    else:
+        argv = [sys.executable, str(auto_tune_script), role]
+        with tune_log_path.open("ab", buffering=0) as log_fh:
+            log_fh.write(launch_diagnostics(f"auto-tune {role}", argv, cwd=panel_dir).encode("utf-8"))
+            proc = subprocess.run(
+                argv,
+                cwd=str(panel_dir),
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            returncode = proc.returncode
+    if returncode != 0:
         raise PanelError(
             f"auto-tune failed for {role} while creating {tune_path}. "
-            f"Check {panel_dir / 'bench-results' / 'tuned' / 'server-tune.log'}."
+            f"Check {tune_log_path}."
         )
 
 
@@ -448,10 +486,33 @@ def build_role_argv_for_config(
 
 def popen_session_kwargs() -> Dict[str, object]:
     if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         return {
-            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            "creationflags": creationflags,
         }
     return {"start_new_session": True}
+
+
+def format_command_for_log(argv: Iterable[str]) -> str:
+    parts = [str(part) for part in argv]
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
+
+
+def launch_diagnostics(label: str, argv: Iterable[str], *, cwd: Path, pid: Optional[int] = None) -> str:
+    action = "started" if pid is not None else "launching"
+    lines = [
+        "",
+        f"[panel] {time.strftime('%Y-%m-%d %H:%M:%S')} {action} {label}",
+        f"[panel] cwd: {cwd}",
+        f"[panel] command: {format_command_for_log(argv)}",
+    ]
+    if pid is not None:
+        lines.append(f"[panel] pid: {pid}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def terminate_process(proc: subprocess.Popen[bytes], *, terminate_timeout: float = 20.0, kill_timeout: float = 10.0) -> None:
