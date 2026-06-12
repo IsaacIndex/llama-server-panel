@@ -41,7 +41,7 @@ from model_juggler import (
     make_handler,
     parse_int_env,
 )
-from update_checker import UpdateCheckResult, check_for_updates
+from update_checker import UpdateCheckResult, UpdateInstallResult, apply_update, check_for_updates
 
 
 ROLES = ("chat", "embed", "vision")
@@ -1233,6 +1233,13 @@ def run_gui() -> int:
             except Exception as exc:
                 self.queue.put(("update_check_error", str(exc)))
 
+        def _apply_update_worker(self, result: UpdateCheckResult) -> None:
+            try:
+                install_result = apply_update(result, self.panel_dir)
+                self.queue.put(("update_install_result", install_result))
+            except Exception as exc:
+                self.queue.put(("update_install_error", str(exc)))
+
         def refresh_status(self) -> None:
             try:
                 config = load_config(self.panel_dir, apply_tune=False)
@@ -1303,8 +1310,12 @@ def run_gui() -> int:
                     result = payload
                     if isinstance(result, UpdateCheckResult):
                         self.append_output(f"{result.message}\n")
-                        title = "Update available" if result.update_available else "Updates"
-                        messagebox.showinfo(title, result.message)
+                        if result.update_available:
+                            self.append_output(f"Downloading and installing {result.latest.tag_name}...\n")
+                            threading.Thread(target=self._apply_update_worker, args=(result,), daemon=True).start()
+                            continue
+                        else:
+                            messagebox.showinfo("Updates", result.message)
                     self.update_check_running = False
                     self.check_updates_button.configure(state="normal")
                 elif kind == "update_check_error":
@@ -1313,6 +1324,20 @@ def run_gui() -> int:
                     message = str(payload)
                     self.append_output(f"Update check failed: {message}\n")
                     messagebox.showerror("Update check failed", message)
+                elif kind == "update_install_result":
+                    self.update_check_running = False
+                    self.check_updates_button.configure(state="normal")
+                    result = payload
+                    if isinstance(result, UpdateInstallResult):
+                        self.append_output(f"{result.message}\n")
+                        messagebox.showinfo("Update installing", result.message)
+                    self.root.after(500, self.exit_for_update)
+                elif kind == "update_install_error":
+                    self.update_check_running = False
+                    self.check_updates_button.configure(state="normal")
+                    message = str(payload)
+                    self.append_output(f"Update install failed: {message}\n")
+                    messagebox.showerror("Update install failed", message)
                 elif kind == "api_test_result":
                     title, message, test_type = payload
                     if test_type == "chat":
@@ -1350,6 +1375,12 @@ def run_gui() -> int:
             running = process_running(self.role_processes.get(role))
             start_button.configure(state="disabled" if running or status in START_PENDING_STATUSES else "normal")
             stop_button.configure(state="normal" if running else "disabled")
+
+        def exit_for_update(self) -> None:
+            for role in list(self.role_processes):
+                self.stop_role(role)
+            self.stop_juggler()
+            self.root.destroy()
 
         def on_close(self) -> None:
             running = [role for role, proc in self.role_processes.items() if process_running(proc)]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 from pathlib import Path
 
@@ -15,21 +16,29 @@ if str(SCRIPTS) not in sys.path:
 from update_checker import (
     VERSION_ENV,
     LatestRelease,
+    ReleaseAsset,
     UpdateCheckError,
     VersionSource,
     build_update_result,
     check_for_updates,
     compare_versions,
     current_app_version,
+    download_update_archive,
+    executable_name,
+    expected_archive_name,
+    extract_update_archive,
     fetch_latest_release,
     parse_latest_release,
+    parse_checksum_file,
     resolve_update_repo,
+    verify_archive_checksum,
 )
 
 
 class FakeResponse:
     def __init__(self, body: bytes) -> None:
         self.body = body
+        self.offset = 0
 
     def __enter__(self) -> "FakeResponse":
         return self
@@ -37,8 +46,14 @@ class FakeResponse:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, size: int = -1) -> bytes:
+        if self.offset >= len(self.body):
+            return b""
+        if size is None or size < 0:
+            size = len(self.body) - self.offset
+        chunk = self.body[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
 
 
 class UpdateCheckerTest(unittest.TestCase):
@@ -71,6 +86,34 @@ class UpdateCheckerTest(unittest.TestCase):
 
         with self.assertRaises(UpdateCheckError):
             parse_latest_release({"html_url": "https://example.test/release"})
+
+    def test_parse_latest_release_parses_download_assets(self) -> None:
+        release = parse_latest_release(
+            {
+                "tag_name": "v0.2.0",
+                "html_url": "https://example.test/release",
+                "assets": [
+                    {
+                        "name": "llama-server-panel-macos-arm64.zip",
+                        "browser_download_url": "https://example.test/app.zip",
+                    },
+                    {
+                        "name": "llama-server-panel-macos-arm64.zip.sha256",
+                        "browser_download_url": "https://example.test/app.zip.sha256",
+                    },
+                    {"name": "", "browser_download_url": "https://example.test/ignored.zip"},
+                    {"name": "ignored.zip", "browser_download_url": ""},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            release.assets,
+            (
+                ReleaseAsset("llama-server-panel-macos-arm64.zip", "https://example.test/app.zip"),
+                ReleaseAsset("llama-server-panel-macos-arm64.zip.sha256", "https://example.test/app.zip.sha256"),
+            ),
+        )
 
     def test_build_update_result_reports_available_current_and_unknown(self) -> None:
         latest = LatestRelease("v0.2.0", "https://example.test/release")
@@ -119,6 +162,74 @@ class UpdateCheckerTest(unittest.TestCase):
 
         with self.assertRaises(UpdateCheckError):
             fetch_latest_release("IsaacIndex/llama-server-panel", opener=lambda request, timeout: FakeResponse(b"[]"))
+
+    def test_download_update_archive_selects_platform_asset_and_verifies_checksum(self) -> None:
+        archive_name = expected_archive_name()
+        archive_bytes = b"archive bytes"
+        digest = __import__("hashlib").sha256(archive_bytes).hexdigest()
+        release = LatestRelease(
+            "v0.2.0",
+            "https://example.test/release",
+            assets=(
+                ReleaseAsset("other-platform.zip", "https://example.test/other.zip"),
+                ReleaseAsset(archive_name, "https://example.test/app.zip"),
+                ReleaseAsset(f"{archive_name}.sha256", "https://example.test/app.zip.sha256"),
+            ),
+        )
+
+        def opener(request: object, timeout: int) -> FakeResponse:
+            if request.full_url == "https://example.test/app.zip":
+                return FakeResponse(archive_bytes)
+            if request.full_url == "https://example.test/app.zip.sha256":
+                return FakeResponse(f"{digest}  {archive_name}\n".encode("utf-8"))
+            self.fail(f"unexpected URL {request.full_url}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = download_update_archive(release, Path(tmp), opener=opener)
+
+            self.assertEqual(archive_path.name, archive_name)
+            self.assertEqual(archive_path.read_bytes(), archive_bytes)
+
+    def test_download_update_archive_requires_platform_asset(self) -> None:
+        release = LatestRelease(
+            "v0.2.0",
+            "https://example.test/release",
+            assets=(ReleaseAsset("other-platform.zip", "https://example.test/other.zip"),),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(UpdateCheckError, expected_archive_name()):
+                download_update_archive(release, Path(tmp), opener=lambda request, timeout: FakeResponse(b""))
+
+    def test_verify_archive_checksum_rejects_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "app.zip"
+            archive_path.write_bytes(b"bad")
+
+            self.assertEqual(parse_checksum_file("0" * 64 + "  app.zip\n", "app.zip"), "0" * 64)
+            with self.assertRaisesRegex(UpdateCheckError, "checksum did not match"):
+                verify_archive_checksum(archive_path, "0" * 64 + "  app.zip\n", "app.zip")
+
+    def test_extract_update_archive_rejects_unsafe_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "update.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../escape.txt", "bad")
+                archive.writestr(executable_name(), "binary")
+
+            with self.assertRaisesRegex(UpdateCheckError, "unsafe path"):
+                extract_update_archive(archive_path, root / "extracted")
+
+    def test_extract_update_archive_requires_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "update.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(VERSION_ENV, "v0.2.0")
+
+            with self.assertRaisesRegex(UpdateCheckError, executable_name()):
+                extract_update_archive(archive_path, root / "extracted")
 
     def test_resolve_update_repo_rejects_invalid_override(self) -> None:
         with self.assertRaises(UpdateCheckError):
