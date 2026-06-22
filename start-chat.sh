@@ -11,4 +11,5 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
+export PANEL_INLINE_LOGS=1
 exec "$PYTHON_BIN" "$SCRIPT_DIR/scripts/llama_role_command.py" exec chat --auto-tune "$@"

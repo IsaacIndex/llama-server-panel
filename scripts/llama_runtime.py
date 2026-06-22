@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, MutableMapping, Optional
+from typing import BinaryIO, Dict, Iterable, Mapping, MutableMapping, Optional
 
 
 ROLE_PREFIX = {
@@ -25,6 +25,22 @@ ROLE_PREFIX = {
     "vision": "VISION",
 }
 GUI_OVERRIDE_FILE = "env.local.gui.json"
+INLINE_LOGS_ENV = "PANEL_INLINE_LOGS"
+COMPAT_FILTER_ENV = "LLAMA_SERVER_COMPAT_FILTER"
+STARTUP_EXIT_GRACE_SECONDS = 1.0
+STARTUP_LOG_TAIL_BYTES = 8192
+
+OPTIONAL_LLAMA_ARG_VALUE_COUNTS = {
+    "--n-cpu-moe": 1,
+    "--cache-type-k": 1,
+    "--cache-type-v": 1,
+    "--flash-attn": 1,
+    "--no-warmup": 0,
+    "--cache-ram": 1,
+    "--reasoning": 1,
+    "--reasoning-format": 1,
+    "--jinja": 0,
+}
 
 PORT_IN_USE_ERRNOS = {
     errno.EADDRINUSE,
@@ -191,6 +207,139 @@ def role_server_log_path(config: Mapping[str, str], role: str) -> Path:
     return Path(config["LOG_DIR"]) / f"{role}.log"
 
 
+def inline_logs_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
+    env = env or os.environ
+    return str(env.get(INLINE_LOGS_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def compat_filter_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
+    env = env or os.environ
+    return str(env.get(COMPAT_FILTER_ENV, "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _stream_binary_target(stream: object) -> Optional[BinaryIO]:
+    if stream is None:
+        return None
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        return buffer
+    if hasattr(stream, "write") and hasattr(stream, "flush"):
+        return stream  # type: ignore[return-value]
+    return None
+
+
+def write_output_chunk(log_fh: BinaryIO, chunk: bytes, *, stream: object = None) -> None:
+    log_fh.write(chunk)
+    log_fh.flush()
+    target = _stream_binary_target(stream)
+    if target is None:
+        return
+    target.write(chunk)
+    target.flush()
+
+
+def mirror_process_output(proc: subprocess.Popen[bytes], log_fh: BinaryIO, *, stream: object = None) -> None:
+    stdout = proc.stdout
+    if stdout is None:
+        return
+    with stdout:
+        while True:
+            chunk = stdout.read1(8192)
+            if not chunk:
+                break
+            write_output_chunk(log_fh, chunk, stream=stream)
+
+
+def looks_like_llama_server(command: str) -> bool:
+    name = command.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in {"llama-server", "llama-server.exe"}
+
+
+def llama_server_help_text(binary: str, *, timeout: float = 8.0) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            [binary, "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            text=True,
+            timeout=timeout,
+            **popen_session_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout
+
+
+def filter_unsupported_llama_args(argv: list[str], help_text: Optional[str]) -> tuple[list[str], list[str]]:
+    if not argv or help_text is None:
+        return list(argv), []
+
+    filtered: list[str] = []
+    removed: list[str] = []
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        value_count = OPTIONAL_LLAMA_ARG_VALUE_COUNTS.get(item)
+        if value_count is not None and item not in help_text:
+            removed.append(item)
+            index += 1 + value_count
+            continue
+        filtered.append(item)
+        index += 1
+    return filtered, removed
+
+
+def prepare_llama_server_argv(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> tuple[list[str], list[str]]:
+    if not argv or not compat_filter_enabled(env) or not looks_like_llama_server(argv[0]):
+        return list(argv), []
+    return filter_unsupported_llama_args(argv, llama_server_help_text(argv[0]))
+
+
+def write_compat_filter_notice(log_fh: BinaryIO, removed_flags: list[str], *, stream: object = None) -> None:
+    if not removed_flags:
+        return
+    flags = ", ".join(removed_flags)
+    message = (
+        "[panel] omitted unsupported optional llama-server arguments after inspecting "
+        f"`llama-server --help`: {flags}\n"
+    )
+    write_output_chunk(log_fh, message.encode("utf-8"), stream=stream)
+
+
+def tail_log_text(path: Path, *, max_bytes: int = STARTUP_LOG_TAIL_BYTES) -> str:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - max_bytes))
+            data = fh.read()
+    except FileNotFoundError:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def raise_if_process_exited(
+    proc: subprocess.Popen[bytes],
+    label: str,
+    log_path: Path,
+    *,
+    grace_seconds: float = STARTUP_EXIT_GRACE_SECONDS,
+) -> None:
+    try:
+        returncode = proc.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        return
+
+    tail = tail_log_text(log_path).strip()
+    message = f"{label} exited during startup with code {returncode}."
+    if tail:
+        message += f"\n\nLast log output from {log_path}:\n{tail}"
+    else:
+        message += f" Check {log_path} for details."
+    raise PanelError(message)
+
+
 def load_config(panel_dir: Optional[Path] = None, *, role: Optional[str] = None, apply_tune: bool = True) -> Dict[str, str]:
     panel_dir = (panel_dir or repo_dir()).resolve()
     config = default_config(panel_dir)
@@ -298,14 +447,37 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
     tune_log_path = panel_dir / "bench-results" / "tuned" / "server-tune.log"
     tune_log_path.parent.mkdir(parents=True, exist_ok=True)
     auto_tune_script = panel_dir / "scripts" / "auto_tune.py"
+    inline_stream = sys.stdout if inline_logs_enabled() else None
     if getattr(sys, "frozen", False):
         previous_stdout_log = os.environ.get("PANEL_AUTO_TUNE_STDOUT_LOG")
         os.environ["PANEL_AUTO_TUNE_STDOUT_LOG"] = "1"
         try:
             with tune_log_path.open("a", encoding="utf-8", errors="replace") as log_fh:
-                log_fh.write(launch_diagnostics(f"auto-tune {role}", ["<bundled>", "auto_tune", role], cwd=panel_dir))
+                preamble = launch_diagnostics(f"auto-tune {role}", ["<bundled>", "auto_tune", role], cwd=panel_dir)
+                log_fh.write(preamble)
                 log_fh.flush()
-                with contextlib.redirect_stdout(log_fh), contextlib.redirect_stderr(log_fh):
+                if inline_stream is None:
+                    stdout_target = log_fh
+                    stderr_target = log_fh
+                else:
+                    class TeeTextIO:
+                        def __init__(self, *targets: object) -> None:
+                            self.targets = targets
+
+                        def write(self, data: str) -> int:
+                            for target in self.targets:
+                                target.write(data)
+                            return len(data)
+
+                        def flush(self) -> None:
+                            for target in self.targets:
+                                target.flush()
+
+                    stdout_target = TeeTextIO(log_fh, sys.stdout)
+                    stderr_target = TeeTextIO(log_fh, sys.stderr)
+                    sys.stdout.write(preamble)
+                    sys.stdout.flush()
+                with contextlib.redirect_stdout(stdout_target), contextlib.redirect_stderr(stderr_target):
                     import auto_tune
 
                     returncode = auto_tune.main([role])
@@ -324,16 +496,33 @@ def ensure_tune_file(role: str, panel_dir: Optional[Path] = None) -> None:
         tune_env = os.environ.copy()
         tune_env["PANEL_AUTO_TUNE_STDOUT_LOG"] = "1"
         with tune_log_path.open("ab", buffering=0) as log_fh:
-            log_fh.write(launch_diagnostics(f"auto-tune {role}", argv, cwd=panel_dir).encode("utf-8"))
-            proc = subprocess.run(
-                argv,
-                cwd=str(panel_dir),
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                check=False,
-                env=tune_env,
-            )
-            returncode = proc.returncode
+            preamble = launch_diagnostics(f"auto-tune {role}", argv, cwd=panel_dir).encode("utf-8")
+            write_output_chunk(log_fh, preamble, stream=inline_stream)
+            if inline_stream is None:
+                proc = subprocess.run(
+                    argv,
+                    cwd=str(panel_dir),
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    env=tune_env,
+                )
+                returncode = proc.returncode
+            else:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=str(panel_dir),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=tune_env,
+                    **popen_session_kwargs(),
+                )
+                try:
+                    mirror_process_output(proc, log_fh, stream=inline_stream)
+                    returncode = proc.wait()
+                except KeyboardInterrupt:
+                    terminate_process(proc)
+                    raise
     if returncode != 0:
         raise PanelError(
             f"auto-tune failed for {role} while creating {tune_path}. "
@@ -502,17 +691,40 @@ def build_role_argv_for_config(
 
 def run_role_argv_with_log(role: str, argv: list[str], *, panel_dir: Path, log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    inline_stream = sys.stdout if inline_logs_enabled() else None
     with log_path.open("ab", buffering=0) as log_fh:
-        log_fh.write(launch_diagnostics(f"{role} llama-server", argv, cwd=panel_dir).encode("utf-8"))
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(panel_dir),
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            **popen_session_kwargs(),
+        launch_argv, removed_flags = prepare_llama_server_argv(argv)
+        write_compat_filter_notice(log_fh, removed_flags, stream=inline_stream)
+        write_output_chunk(
+            log_fh,
+            launch_diagnostics(f"{role} llama-server", launch_argv, cwd=panel_dir).encode("utf-8"),
+            stream=inline_stream,
         )
-        log_fh.write(launch_diagnostics(f"{role} llama-server", argv, cwd=panel_dir, pid=proc.pid).encode("utf-8"))
+        popen_kwargs = popen_session_kwargs()
+        if inline_stream is None:
+            proc = subprocess.Popen(
+                launch_argv,
+                cwd=str(panel_dir),
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+        else:
+            proc = subprocess.Popen(
+                launch_argv,
+                cwd=str(panel_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+        write_output_chunk(
+            log_fh,
+            launch_diagnostics(f"{role} llama-server", launch_argv, cwd=panel_dir, pid=proc.pid).encode("utf-8"),
+            stream=inline_stream,
+        )
         try:
+            if inline_stream is not None:
+                mirror_process_output(proc, log_fh, stream=inline_stream)
             return proc.wait()
         except KeyboardInterrupt:
             terminate_process(proc)

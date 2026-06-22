@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import os
 import sys
 import tempfile
 import unittest
@@ -11,15 +13,25 @@ from scripts.llama_runtime import (
     PanelError,
     default_config,
     ensure_llama_server_binary,
+    filter_unsupported_llama_args,
     launch_diagnostics,
     load_config,
     popen_session_kwargs,
+    prepare_llama_server_argv,
+    raise_if_process_exited,
     role_server_log_path,
     run_role_argv_with_log,
 )
 
 
 class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
+    class _StdoutCapture:
+        def __init__(self) -> None:
+            self.buffer = io.BytesIO()
+
+        def flush(self) -> None:
+            self.buffer.flush()
+
     def test_defaults_are_repo_local_and_path_based(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             panel_dir = Path(tmp)
@@ -95,6 +107,85 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
             self.assertIn("launching chat llama-server", text)
             self.assertIn("started chat llama-server", text)
             self.assertIn("server output", text)
+
+    def test_run_role_argv_with_log_streams_inline_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_path = panel_dir / "logs" / "chat.log"
+            stdout_capture = self._StdoutCapture()
+
+            with (
+                patch.dict(os.environ, {"PANEL_INLINE_LOGS": "1"}, clear=False),
+                patch.object(llama_runtime.sys, "stdout", stdout_capture),
+            ):
+                returncode = run_role_argv_with_log(
+                    "chat",
+                    [sys.executable, "-c", "print('inline output')"],
+                    panel_dir=panel_dir,
+                    log_path=log_path,
+                )
+
+            self.assertEqual(returncode, 0)
+            text = log_path.read_text(encoding="utf-8")
+            self.assertIn("inline output", text)
+            self.assertIn("inline output", stdout_capture.buffer.getvalue().decode("utf-8"))
+
+    def test_filter_unsupported_llama_args_removes_optional_flags_missing_from_help(self) -> None:
+        argv = [
+            "llama-server",
+            "--model",
+            "chat.gguf",
+            "--n-cpu-moe",
+            "40",
+            "--cache-type-k",
+            "q8_0",
+            "--reasoning",
+            "on",
+            "--temp",
+            "0.6",
+            "--jinja",
+        ]
+
+        filtered, removed = filter_unsupported_llama_args(argv, "--model\n--cache-type-k\n--temp\n")
+
+        self.assertEqual(removed, ["--n-cpu-moe", "--reasoning", "--jinja"])
+        self.assertEqual(filtered, ["llama-server", "--model", "chat.gguf", "--cache-type-k", "q8_0", "--temp", "0.6"])
+
+    def test_prepare_llama_server_argv_handles_windows_exe_path(self) -> None:
+        argv = [r"C:\Tools\llama-server.EXE", "--model", "chat.gguf", "--reasoning", "on"]
+
+        with patch.object(llama_runtime, "llama_server_help_text", return_value="--model\n"):
+            filtered, removed = prepare_llama_server_argv(argv)
+
+        self.assertEqual(removed, ["--reasoning"])
+        self.assertEqual(filtered, [r"C:\Tools\llama-server.EXE", "--model", "chat.gguf"])
+
+    def test_prepare_llama_server_argv_can_be_disabled(self) -> None:
+        argv = ["llama-server", "--model", "chat.gguf", "--reasoning", "on"]
+
+        with patch.object(llama_runtime, "llama_server_help_text") as help_text:
+            filtered, removed = prepare_llama_server_argv(argv, env={"LLAMA_SERVER_COMPAT_FILTER": "0"})
+
+        help_text.assert_not_called()
+        self.assertEqual(removed, [])
+        self.assertEqual(filtered, argv)
+
+    def test_raise_if_process_exited_reports_log_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "chat.log"
+            with log_path.open("wb") as log_fh:
+                proc = llama_runtime.subprocess.Popen(
+                    [sys.executable, "-c", "import sys; print('unknown argument: --reasoning'); sys.exit(9)"],
+                    stdout=log_fh,
+                    stderr=llama_runtime.subprocess.STDOUT,
+                )
+
+            with self.assertRaises(PanelError) as ctx:
+                raise_if_process_exited(proc, "Chat", log_path, grace_seconds=5)
+
+        message = str(ctx.exception)
+        self.assertIn("Chat exited during startup with code 9", message)
+        self.assertIn("unknown argument: --reasoning", message)
 
     def test_ensure_llama_server_binary_rejects_panel_launcher_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

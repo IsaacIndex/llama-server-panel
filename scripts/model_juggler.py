@@ -25,13 +25,20 @@ from urllib.parse import urlsplit
 from llama_runtime import (
     PanelError,
     build_role_argv,
+    inline_logs_enabled,
     launch_diagnostics,
     load_config,
+    mirror_process_output,
     popen_session_kwargs,
+    prepare_llama_server_argv,
     port_in_use as runtime_port_in_use,
+    raise_if_process_exited,
     role_environment,
+    tail_log_text,
     terminate_process as terminate_runtime_process,
     validate_role_files,
+    write_compat_filter_notice,
+    write_output_chunk,
 )
 
 
@@ -110,9 +117,23 @@ def llama_ready(host: str, port: int, timeout: float = 1.5) -> bool:
             pass
 
 
-def wait_ready(host: str, port: int, timeout: float) -> None:
+def wait_ready(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    proc: Optional[subprocess.Popen[bytes]] = None,
+    log_path: Optional[Path] = None,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            message = f"llama-server on {host}:{port} exited during startup with code {proc.returncode}"
+            if log_path is not None:
+                tail = tail_log_text(log_path).strip()
+                if tail:
+                    message += f"\n\nLast log output from {log_path}:\n{tail}"
+            raise StartupError(message)
         if llama_ready(host, port):
             return
         time.sleep(1)
@@ -137,6 +158,11 @@ class LocalAddress:
     interface: str
     address: str
     status: str
+
+
+def mirror_runtime_output(proc: subprocess.Popen[bytes], log_path: Path, *, stream: object = None) -> None:
+    with log_path.open("ab", buffering=0) as log_fh:
+        mirror_process_output(proc, log_fh, stream=stream)
 
 
 class JugglerState:
@@ -232,26 +258,73 @@ class JugglerState:
 
         runtime.log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fh = open(runtime.log_path, "ab", buffering=0)
+        inline_stream = sys.stdout if inline_logs_enabled() else None
         try:
-            log_fh.write(f"[panel] preparing {role} backend on {runtime.host}:{runtime.backend_port}\n".encode("utf-8"))
-            argv = helper_argv(role, port=runtime.backend_port, host=runtime.host, auto_tune=self.auto_tune)
-            log_fh.write(launch_diagnostics(f"{role} backend", argv, cwd=REPO_DIR).encode("utf-8"))
-            runtime.process = subprocess.Popen(
-                argv,
-                cwd=str(REPO_DIR),
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                **popen_session_kwargs(),
+            write_output_chunk(
+                log_fh,
+                f"[panel] preparing {role} backend on {runtime.host}:{runtime.backend_port}\n".encode("utf-8"),
+                stream=inline_stream,
             )
-            log_fh.write(launch_diagnostics(f"{role} backend", argv, cwd=REPO_DIR, pid=runtime.process.pid).encode("utf-8"))
+            argv = helper_argv(role, port=runtime.backend_port, host=runtime.host, auto_tune=self.auto_tune)
+            launch_argv, removed_flags = prepare_llama_server_argv(argv)
+            write_compat_filter_notice(log_fh, removed_flags, stream=inline_stream)
+            write_output_chunk(
+                log_fh,
+                launch_diagnostics(f"{role} backend", launch_argv, cwd=REPO_DIR).encode("utf-8"),
+                stream=inline_stream,
+            )
+            if inline_stream is None:
+                runtime.process = subprocess.Popen(
+                    launch_argv,
+                    cwd=str(REPO_DIR),
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    **popen_session_kwargs(),
+                )
+            else:
+                runtime.process = subprocess.Popen(
+                    launch_argv,
+                    cwd=str(REPO_DIR),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    **popen_session_kwargs(),
+                )
+            write_output_chunk(
+                log_fh,
+                launch_diagnostics(f"{role} backend", launch_argv, cwd=REPO_DIR, pid=runtime.process.pid).encode("utf-8"),
+                stream=inline_stream,
+            )
+            if inline_stream is not None and runtime.process.stdout is not None:
+                threading.Thread(
+                    target=mirror_runtime_output,
+                    args=(runtime.process, runtime.log_path),
+                    kwargs={"stream": inline_stream},
+                    daemon=True,
+                ).start()
         except Exception as exc:
-            log_fh.write(f"[panel] startup failed: {exc}\n".encode("utf-8", errors="replace"))
+            write_output_chunk(
+                log_fh,
+                f"[panel] startup failed: {exc}\n".encode("utf-8", errors="replace"),
+                stream=inline_stream,
+            )
             raise
         finally:
             log_fh.close()
 
+        if runtime.process is not None:
+            try:
+                raise_if_process_exited(runtime.process, f"{role} backend", runtime.log_path)
+            except PanelError as exc:
+                raise StartupError(str(exc)) from exc
+
         try:
-            wait_ready(runtime.host, runtime.backend_port, self.startup_timeout)
+            wait_ready(
+                runtime.host,
+                runtime.backend_port,
+                self.startup_timeout,
+                proc=runtime.process,
+                log_path=runtime.log_path,
+            )
         except Exception as exc:
             with runtime.log_path.open("ab", buffering=0) as failure_log_fh:
                 failure_log_fh.write(f"[panel] startup failed: {exc}\n".encode("utf-8", errors="replace"))

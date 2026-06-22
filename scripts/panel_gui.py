@@ -27,10 +27,13 @@ from llama_runtime import (
     load_config,
     popen_session_kwargs,
     port_in_use,
+    prepare_llama_server_argv,
+    raise_if_process_exited,
     repo_dir,
     terminate_process,
     tune_file_exists,
     validate_role_files,
+    write_compat_filter_notice,
 )
 from model_juggler import (
     GATEWAY_DEFAULT_BIND,
@@ -1115,20 +1118,23 @@ def run_gui() -> int:
                 argv = build_role_argv(role, panel_dir=self.panel_dir, auto_tune=self.auto_tune.get())
                 log_fh = open(log_path, "ab", buffering=0)
                 try:
-                    log_fh.write(launch_diagnostics(ROLE_LABELS[role], argv, cwd=self.panel_dir).encode("utf-8"))
+                    launch_argv, removed_flags = prepare_llama_server_argv(argv)
+                    write_compat_filter_notice(log_fh, removed_flags)
+                    log_fh.write(launch_diagnostics(ROLE_LABELS[role], launch_argv, cwd=self.panel_dir).encode("utf-8"))
                     proc = subprocess.Popen(
-                        argv,
+                        launch_argv,
                         cwd=str(self.panel_dir),
                         stdout=log_fh,
                         stderr=subprocess.STDOUT,
                         **popen_session_kwargs(),
                     )
-                    log_fh.write(launch_diagnostics(ROLE_LABELS[role], argv, cwd=self.panel_dir, pid=proc.pid).encode("utf-8"))
+                    log_fh.write(launch_diagnostics(ROLE_LABELS[role], launch_argv, cwd=self.panel_dir, pid=proc.pid).encode("utf-8"))
                 except Exception as exc:
                     log_fh.write(f"[panel] launch failed: {exc}\n".encode("utf-8", errors="replace"))
                     raise
                 finally:
                     log_fh.close()
+                raise_if_process_exited(proc, ROLE_LABELS[role], log_path)
                 self.queue.put(("role_started", (role, proc, log_path)))
             except Exception as exc:
                 self.queue.put(("role_error", (role, str(exc))))

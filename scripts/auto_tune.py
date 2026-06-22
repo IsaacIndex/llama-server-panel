@@ -23,12 +23,14 @@ from llama_runtime import (
     launch_diagnostics,
     load_config,
     popen_session_kwargs,
+    prepare_llama_server_argv,
     port_in_use,
     repo_dir,
     terminate_process,
     thread_candidates,
     tune_file_path,
     validate_role_files,
+    write_compat_filter_notice,
 )
 
 
@@ -200,9 +202,11 @@ def start_server(
     log_fh = open(log_path, "wb")
     try:
         log_fh.write(f"[panel] candidate log: {log_path}\n".encode("utf-8"))
-        log_fh.write(launch_diagnostics(f"{role} tune candidate", argv, cwd=repo_dir()).encode("utf-8"))
+        launch_argv, removed_flags = prepare_llama_server_argv(argv)
+        write_compat_filter_notice(log_fh, removed_flags)
+        log_fh.write(launch_diagnostics(f"{role} tune candidate", launch_argv, cwd=repo_dir()).encode("utf-8"))
         proc = subprocess.Popen(
-            argv,
+            launch_argv,
             cwd=str(repo_dir()),
             stdout=log_fh,
             stderr=subprocess.STDOUT,

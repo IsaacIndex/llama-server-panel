@@ -154,7 +154,10 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
                 "CHAT_PRESENCE_PENALTY": "1.5",
             }
 
-            with patch("auto_tune.subprocess.Popen", return_value=SimpleNamespace(pid=123)) as popen:
+            with (
+                patch("auto_tune.prepare_llama_server_argv", side_effect=lambda argv: (argv, [])),
+                patch("auto_tune.subprocess.Popen", return_value=SimpleNamespace(pid=123)) as popen,
+            ):
                 auto_tune.start_server("chat", config, host="127.0.0.1", port=9998, log_path=log_path)
 
             text = log_path.read_text(encoding="utf-8")
