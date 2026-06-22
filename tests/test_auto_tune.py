@@ -80,6 +80,7 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
                 "LLAMA_HOST": "127.0.0.1",
                 "LLAMA_SERVER_PANEL_DIR": str(panel_dir),
                 "CHAT_MODEL": str(panel_dir / "models" / "chat.gguf"),
+                "CHAT_CTX_SIZE": "4096",
             }
 
             with (
@@ -102,6 +103,138 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
             candidate_paths = {call.kwargs["log_path"] for call in bench_chat_like.call_args_list}
             self.assertNotIn(tune_log, candidate_paths)
             self.assertTrue(all("candidate-" in path.name for path in candidate_paths))
+
+    def test_context_candidates_preserve_configured_value_then_lower_sizes(self) -> None:
+        self.assertEqual(auto_tune.context_candidates("4000"), ["4000", "3072", "2048", "1024", "512"])
+        self.assertEqual(auto_tune.context_candidates("1024"), ["1024", "512"])
+        self.assertEqual(auto_tune.context_candidates("custom"), ["custom"])
+        self.assertEqual(auto_tune.context_candidates("0"), ["0"])
+        self.assertEqual(auto_tune.context_candidates(""), [""])
+
+    def test_chat_tune_retries_lower_context_after_memory_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            config = {
+                "LLAMA_HOST": "127.0.0.1",
+                "LLAMA_SERVER_PANEL_DIR": str(panel_dir),
+                "CHAT_MODEL": str(panel_dir / "models" / "chat.gguf"),
+                "CHAT_CTX_SIZE": "4000",
+            }
+
+            def bench_with_context(*_args, **kwargs) -> float:
+                base_config = _args[1]
+                log_path = kwargs["log_path"]
+                if base_config["CHAT_CTX_SIZE"] == "4000":
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    log_path.write_text(
+                        "common_params_fit_impl: cannot meet free memory target of 1024 MiB\n",
+                        encoding="utf-8",
+                    )
+                    return 0.0
+                return 12.0 if kwargs["cache_k"] == "q4_0" and kwargs["cache_v"] == "q4_0" else 4.0
+
+            with (
+                patch("auto_tune.repo_dir", return_value=panel_dir),
+                patch("auto_tune.load_config", return_value=config),
+                patch("auto_tune.validate_role_files"),
+                patch("auto_tune.port_in_use", return_value=False),
+                patch("auto_tune.cpu_counts", return_value=(10, 6)),
+                patch("auto_tune.host_label", return_value="test-host"),
+                patch("auto_tune.thread_candidates", return_value=[2]),
+                patch("auto_tune.bench_chat_like", side_effect=bench_with_context) as bench_chat_like,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(auto_tune.main(["chat"]), 0)
+
+            contexts = [call.args[1]["CHAT_CTX_SIZE"] for call in bench_chat_like.call_args_list]
+            self.assertEqual(contexts, ["4000", "4000", "4000", "4000", "3072", "3072", "3072", "3072"])
+
+            tune_path = panel_dir / "bench-results" / "tuned" / "chat.chat.sh"
+            tune_text = tune_path.read_text(encoding="utf-8")
+            self.assertIn("export CHAT_CTX_SIZE=3072", tune_text)
+            self.assertIn("export CHAT_THREADS=2", tune_text)
+            self.assertIn("export CHAT_CACHE_TYPE_K=q4_0", tune_text)
+            self.assertIn("export CHAT_CACHE_TYPE_V=q4_0", tune_text)
+
+            tune_log = panel_dir / "bench-results" / "tuned" / "server-tune.log"
+            tune_log_text = tune_log.read_text(encoding="utf-8")
+            self.assertIn("retrying with lower context", tune_log_text)
+            self.assertIn("Best: ctx=3072", tune_log_text)
+
+    def test_chat_tune_retries_lower_context_after_projected_memory_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            config = {
+                "LLAMA_HOST": "127.0.0.1",
+                "LLAMA_SERVER_PANEL_DIR": str(panel_dir),
+                "CHAT_MODEL": str(panel_dir / "models" / "chat.gguf"),
+                "CHAT_CTX_SIZE": "4000",
+            }
+
+            def bench_with_projection(*_args, **kwargs) -> float:
+                base_config = _args[1]
+                log_path = kwargs["log_path"]
+                if base_config["CHAT_CTX_SIZE"] == "4000":
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    log_path.write_text(
+                        "common_params_fit_impl: projected to use 12000 MiB of device memory "
+                        "vs. 12300 MiB of free device memory\n",
+                        encoding="utf-8",
+                    )
+                    return 0.0
+                return 9.0
+
+            with (
+                patch("auto_tune.repo_dir", return_value=panel_dir),
+                patch("auto_tune.load_config", return_value=config),
+                patch("auto_tune.validate_role_files"),
+                patch("auto_tune.port_in_use", return_value=False),
+                patch("auto_tune.cpu_counts", return_value=(10, 6)),
+                patch("auto_tune.host_label", return_value="test-host"),
+                patch("auto_tune.thread_candidates", return_value=[2]),
+                patch("auto_tune.bench_chat_like", side_effect=bench_with_projection) as bench_chat_like,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(auto_tune.main(["chat"]), 0)
+
+            contexts = [call.args[1]["CHAT_CTX_SIZE"] for call in bench_chat_like.call_args_list]
+            self.assertEqual(contexts, ["4000", "4000", "4000", "4000", "3072", "3072", "3072", "3072"])
+
+    def test_chat_tune_does_not_retry_lower_context_without_memory_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            config = {
+                "LLAMA_HOST": "127.0.0.1",
+                "LLAMA_SERVER_PANEL_DIR": str(panel_dir),
+                "CHAT_MODEL": str(panel_dir / "models" / "chat.gguf"),
+                "CHAT_CTX_SIZE": "4000",
+            }
+
+            def bench_without_pressure(*_args, **kwargs) -> float:
+                log_path = kwargs["log_path"]
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("server exited before health check\n", encoding="utf-8")
+                return 0.0
+
+            with (
+                patch("auto_tune.repo_dir", return_value=panel_dir),
+                patch("auto_tune.load_config", return_value=config),
+                patch("auto_tune.validate_role_files"),
+                patch("auto_tune.port_in_use", return_value=False),
+                patch("auto_tune.cpu_counts", return_value=(10, 6)),
+                patch("auto_tune.thread_candidates", return_value=[2]),
+                patch("auto_tune.bench_chat_like", side_effect=bench_without_pressure) as bench_chat_like,
+                patch("builtins.print"),
+            ):
+                with self.assertRaisesRegex(PanelError, "No working chat tuning configuration"):
+                    auto_tune.main(["chat"])
+
+            contexts = [call.args[1]["CHAT_CTX_SIZE"] for call in bench_chat_like.call_args_list]
+            self.assertEqual(contexts, ["4000", "4000", "4000", "4000"])
+
+            tune_log = panel_dir / "bench-results" / "tuned" / "server-tune.log"
+            tune_log_text = tune_log.read_text(encoding="utf-8")
+            self.assertIn("not trying lower context sizes", tune_log_text)
 
     def test_bench_chat_like_estimates_score_from_usage_when_timings_missing(self) -> None:
         proc = SimpleNamespace(returncode=None, poll=lambda: None)

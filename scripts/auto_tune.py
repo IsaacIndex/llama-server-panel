@@ -50,6 +50,7 @@ EMBED_TEXT = (
     "synchronization. Systems like Bigtable, Dynamo, and Cassandra use consistent hashing for data partitioning."
 )
 TUNE_LOG_PATH: Optional[Path] = None
+CHAT_LIKE_CTX_FALLBACKS = (8192, 4096, 3072, 2048, 1024, 512)
 
 
 def set_tune_log_path(path: Optional[Path]) -> None:
@@ -171,6 +172,28 @@ def startup_memory_pressure_message(log_path: Path, *, memory_headroom_mib: int 
             f"(headroom {memory_headroom_mib} MiB)"
         )
     return ""
+
+
+def context_candidates(ctx_size: str) -> list[str]:
+    raw = str(ctx_size).strip()
+    try:
+        configured = int(raw)
+    except ValueError:
+        return [raw]
+    if configured <= 0:
+        return [raw]
+
+    values = [configured]
+    values.extend(value for value in CHAT_LIKE_CTX_FALLBACKS if value < configured)
+    return [str(value) for value in dict.fromkeys(values)]
+
+
+def logs_indicate_memory_pressure(paths: list[Path]) -> bool:
+    return any(startup_memory_pressure_message(path) for path in paths)
+
+
+def path_label(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "default"
 
 
 def score_from_slots(host: str, port: int) -> float:
@@ -403,37 +426,65 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.role in {"chat", "vision"}:
         cache_combos = [("f16", "f16"), ("q8_0", "q8_0"), ("q4_0", "q4_0"), ("q8_0", "q4_0")]
-        total_runs = len(candidates) * len(cache_combos)
+        ctx_values = context_candidates(config[f"{prefix}_CTX_SIZE"])
+        total_runs = len(ctx_values) * len(candidates) * len(cache_combos)
         current = 0
-        for threads in candidates:
-            for cache_k, cache_v in cache_combos:
-                current += 1
-                candidate_log_path = tune_dir / (
-                    f"{Path(config[f'{prefix}_MODEL']).stem}.{args.role}."
-                    f"candidate-{current:02d}-threads-{threads}-k-{cache_k}-v-{cache_v}.log"
-                )
-                log(f"[{current}/{total_runs}] threads={threads} cache_k={cache_k} cache_v={cache_v}")
-                log(f"  candidate log: {candidate_log_path}")
-                score = bench_chat_like(
-                    args.role,
-                    config,
-                    host=tune_host,
-                    port=tune_port,
-                    threads=threads,
-                    cache_k=cache_k,
-                    cache_v=cache_v,
-                    log_path=candidate_log_path,
-                    prompt=BENCH_PROMPT if args.role == "chat" else VISION_BENCH_PROMPT,
-                    startup_timeout=startup_timeout,
-                )
-                log(f"  -> {score:.2f} tok/s")
-                if score > best_score:
-                    best_score = score
-                    best_threads = str(threads)
-                    best_cache_k = cache_k
-                    best_cache_v = cache_v
+        best_ctx_size = config[f"{prefix}_CTX_SIZE"]
+        log(f"Context sweep: {' '.join(ctx_values)}")
+        for ctx_index, ctx_size in enumerate(ctx_values):
+            context_config = dict(config)
+            context_config[f"{prefix}_CTX_SIZE"] = ctx_size
+            context_best_score = -1.0
+            context_logs: list[Path] = []
+            log(f"Trying {prefix}_CTX_SIZE={ctx_size}")
+            for threads in candidates:
+                for cache_k, cache_v in cache_combos:
+                    current += 1
+                    candidate_log_path = tune_dir / (
+                        f"{Path(config[f'{prefix}_MODEL']).stem}.{args.role}."
+                        f"candidate-{current:02d}-ctx-{path_label(ctx_size)}-threads-{threads}-k-{cache_k}-v-{cache_v}.log"
+                    )
+                    context_logs.append(candidate_log_path)
+                    log(f"[{current}/{total_runs}] ctx={ctx_size} threads={threads} cache_k={cache_k} cache_v={cache_v}")
+                    log(f"  candidate log: {candidate_log_path}")
+                    score = bench_chat_like(
+                        args.role,
+                        context_config,
+                        host=tune_host,
+                        port=tune_port,
+                        threads=threads,
+                        cache_k=cache_k,
+                        cache_v=cache_v,
+                        log_path=candidate_log_path,
+                        prompt=BENCH_PROMPT if args.role == "chat" else VISION_BENCH_PROMPT,
+                        startup_timeout=startup_timeout,
+                    )
+                    log(f"  -> {score:.2f} tok/s")
+                    if score > context_best_score:
+                        context_best_score = score
+                    if score > best_score:
+                        best_score = score
+                        best_ctx_size = ctx_size
+                        best_threads = str(threads)
+                        best_cache_k = cache_k
+                        best_cache_v = cache_v
+            if context_best_score > 0:
+                break
+            if ctx_index >= len(ctx_values) - 1:
+                break
+            if logs_indicate_memory_pressure(context_logs):
+                log(f"No working {args.role} candidate at {prefix}_CTX_SIZE={ctx_size}; retrying with lower context")
+                continue
+            log(
+                f"No working {args.role} candidate at {prefix}_CTX_SIZE={ctx_size}, "
+                "and candidate logs do not show memory pressure; not trying lower context sizes"
+            )
+            break
 
-        log(f"Best: threads={best_threads} cache_k={best_cache_k} cache_v={best_cache_v} ({best_score:.2f} tok/s)")
+        log(
+            f"Best: ctx={best_ctx_size} threads={best_threads} cache_k={best_cache_k} "
+            f"cache_v={best_cache_v} ({best_score:.2f} tok/s)"
+        )
         if best_score <= 0:
             message = (
                 f"No working {args.role} tuning configuration started. "
@@ -446,12 +497,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.role,
             config,
             [
+                f"export {prefix}_CTX_SIZE={best_ctx_size}",
                 f"export {prefix}_THREADS={best_threads}",
                 f"export {prefix}_CACHE_TYPE_K={best_cache_k}",
                 f"export {prefix}_CACHE_TYPE_V={best_cache_v}",
             ],
             best_score=best_score,
-            tested=total_runs,
+            tested=current,
             unit="tok/s",
         )
         return 0
