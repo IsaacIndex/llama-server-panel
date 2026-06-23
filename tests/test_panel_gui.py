@@ -283,6 +283,76 @@ class PanelGuiHelpersTest(unittest.TestCase):
             self.assertIn("Auto-tune log", text)
             self.assertIn("auto tune candidate", text)
 
+    def test_role_log_display_includes_auto_tune_candidate_log_tails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            tune_dir = panel_dir / "bench-results" / "tuned"
+            log_dir.mkdir()
+            tune_dir.mkdir(parents=True)
+            candidate_one = tune_dir / "chat.candidate-01.log"
+            candidate_two = tune_dir / "chat.candidate-02.log"
+            (log_dir / "chat-gui.log").write_text("preparing chat launch\n", encoding="utf-8")
+            candidate_one.write_text("candidate one failed before health check\n", encoding="utf-8")
+            candidate_two.write_text("candidate two reported llama.cpp memory pressure\n", encoding="utf-8")
+            (tune_dir / "server-tune.log").write_text(
+                "\n".join(
+                    [
+                        f"[tune]   candidate log: {candidate_one}",
+                        f"[tune]   candidate log: {candidate_two}",
+                        "[tune] No working chat tuning configuration started.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            text = role_log_display_text({"LOG_DIR": str(log_dir)}, "chat", panel_dir=panel_dir)
+
+            self.assertIn("Auto-tune candidate log", text)
+            self.assertIn(str(candidate_one), text)
+            self.assertIn("candidate one failed before health check", text)
+            self.assertIn(str(candidate_two), text)
+            self.assertIn("candidate two reported llama.cpp memory pressure", text)
+
+    def test_role_log_display_reports_missing_auto_tune_candidate_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            tune_dir = panel_dir / "bench-results" / "tuned"
+            log_dir.mkdir()
+            tune_dir.mkdir(parents=True)
+            missing_candidate = tune_dir / "missing.candidate-01.log"
+            (log_dir / "chat-gui.log").write_text("preparing chat launch\n", encoding="utf-8")
+            (tune_dir / "server-tune.log").write_text(
+                f"[tune]   candidate log: {missing_candidate}\n",
+                encoding="utf-8",
+            )
+
+            text = role_log_display_text({"LOG_DIR": str(log_dir)}, "chat", panel_dir=panel_dir)
+
+            self.assertIn(str(missing_candidate), text)
+            self.assertIn("No log yet", text)
+
+    def test_role_log_display_reports_empty_auto_tune_candidate_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            tune_dir = panel_dir / "bench-results" / "tuned"
+            log_dir.mkdir()
+            tune_dir.mkdir(parents=True)
+            empty_candidate = tune_dir / "empty.candidate-01.log"
+            empty_candidate.write_text("", encoding="utf-8")
+            (log_dir / "chat-gui.log").write_text("preparing chat launch\n", encoding="utf-8")
+            (tune_dir / "server-tune.log").write_text(
+                f"[tune]   candidate log: {empty_candidate}\n",
+                encoding="utf-8",
+            )
+
+            text = role_log_display_text({"LOG_DIR": str(log_dir)}, "chat", panel_dir=panel_dir)
+
+            self.assertIn(str(empty_candidate), text)
+            self.assertIn("Candidate log is empty", text)
+
     def test_role_log_display_omits_missing_auto_tune_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             panel_dir = Path(tmp)

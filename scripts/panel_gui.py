@@ -8,6 +8,7 @@ import base64
 import mimetypes
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -97,9 +98,12 @@ PATH_KEYS = {
 }
 API_TIMEOUT_SECONDS = 3600
 LOG_TAIL_BYTES = 64 * 1024
+AUTO_TUNE_CANDIDATE_TAIL_BYTES = 8 * 1024
+AUTO_TUNE_CANDIDATE_LOG_LIMIT = 3
 MAX_TEST_IMAGE_BYTES = 20 * 1024 * 1024
 SUPPORTED_TEST_IMAGE_MIME_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 START_PENDING_STATUSES = {"Loading", "Starting"}
+AUTO_TUNE_CANDIDATE_LOG_RE = re.compile(r"candidate log:\s+(.+?)\s*$")
 IBM_BLUE = "#0f62fe"
 IBM_BLUE_HOVER = "#0050e6"
 IBM_BLUE_PRESSED = "#002d9c"
@@ -408,6 +412,26 @@ def auto_tune_log_path(panel_dir: Path) -> Path:
     return panel_dir / "bench-results" / "tuned" / "server-tune.log"
 
 
+def auto_tune_candidate_log_paths(tune_text: str, *, tune_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for line in tune_text.splitlines():
+        match = AUTO_TUNE_CANDIDATE_LOG_RE.search(line)
+        if match is None:
+            continue
+        raw_path = match.group(1).strip().strip("\"'")
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = tune_dir / path
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
 def tail_file_text(path: Path, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
     try:
         size = path.stat().st_size
@@ -424,6 +448,26 @@ def tail_file_text(path: Path, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
         return prefix + fh.read().decode("utf-8", errors="replace")
 
 
+def auto_tune_candidate_log_display_text(
+    tune_text: str,
+    *,
+    tune_dir: Path,
+    max_logs: int = AUTO_TUNE_CANDIDATE_LOG_LIMIT,
+    max_bytes: int = AUTO_TUNE_CANDIDATE_TAIL_BYTES,
+) -> str:
+    paths = auto_tune_candidate_log_paths(tune_text, tune_dir=tune_dir)
+    if not paths:
+        return f"== Recent auto-tune candidate logs ==\nNo candidate logs are referenced in {tune_dir / 'server-tune.log'} yet.\n"
+
+    sections: list[str] = []
+    for path in paths[-max_logs:]:
+        text = tail_file_text(path, max_bytes=max_bytes)
+        if path.is_file() and not text:
+            text = f"Candidate log is empty: {path}\n"
+        sections.append(f"== Auto-tune candidate log: {path} ==\n{text}")
+    return "\n".join(sections)
+
+
 def role_log_display_text(config: Mapping[str, str], role: str, *, panel_dir: Path, max_bytes: int = LOG_TAIL_BYTES) -> str:
     log_path = role_log_path(config, role)
     sections = [
@@ -432,9 +476,17 @@ def role_log_display_text(config: Mapping[str, str], role: str, *, panel_dir: Pa
     ]
     tune_path = auto_tune_log_path(panel_dir)
     if tune_path.is_file():
+        tune_text = tail_file_text(tune_path, max_bytes=max_bytes)
         sections.append(
             f"== Auto-tune log: {tune_path} ==\n"
-            f"{tail_file_text(tune_path, max_bytes=max_bytes)}"
+            f"{tune_text}"
+        )
+        sections.append(
+            auto_tune_candidate_log_display_text(
+                tune_text,
+                tune_dir=tune_path.parent,
+                max_bytes=min(max_bytes, AUTO_TUNE_CANDIDATE_TAIL_BYTES),
+            )
         )
     return "\n".join(sections)
 
@@ -1338,7 +1390,12 @@ def run_gui() -> int:
                     role, message = payload
                     self.status_vars[role].set("Stopped")
                     self.update_role_controls(role)
-                    messagebox.showerror(f"{ROLE_LABELS[role]} start failed", message)
+                    self.append_output(f"{ROLE_LABELS[role]} start failed: {message}\n")
+                    self.refresh_logs_once()
+                    messagebox.showerror(
+                        f"{ROLE_LABELS[role]} start failed",
+                        f"{message}\n\nDiagnostics were refreshed. Check the Auto-tune candidate log sections for startup details.",
+                    )
                 elif kind == "juggler_started":
                     handle, message = payload
                     self.juggler_handle = handle
