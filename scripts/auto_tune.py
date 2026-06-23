@@ -42,6 +42,7 @@ MEMORY_FIT_FAILURE_MARKERS = (
     "cannot meet free memory target",
     "failed to fit params to free device memory",
 )
+WINDOWS_ACCESS_VIOLATION_EXIT_CODES = {3221225477, -1073741819}
 BENCH_PROMPT = "Explain the concept of recursion in programming with a clear example."
 VISION_BENCH_PROMPT = "Describe what you see in this image in detail."
 EMBED_TEXT = (
@@ -51,11 +52,62 @@ EMBED_TEXT = (
 )
 TUNE_LOG_PATH: Optional[Path] = None
 CHAT_LIKE_CTX_FALLBACKS = (8192, 4096, 3072, 2048, 1024, 512)
+STARTUP_EXIT_CODES: list[int] = []
 
 
 def set_tune_log_path(path: Optional[Path]) -> None:
     global TUNE_LOG_PATH
     TUNE_LOG_PATH = path
+
+
+def reset_startup_failure_state() -> None:
+    STARTUP_EXIT_CODES.clear()
+
+
+def record_startup_exit_code(returncode: Optional[int]) -> None:
+    if returncode is not None:
+        STARTUP_EXIT_CODES.append(returncode)
+
+
+def startup_exit_code_hint(returncode: Optional[int]) -> str:
+    if returncode in WINDOWS_ACCESS_VIOLATION_EXIT_CODES:
+        return (
+            "Windows access violation 0xC0000005 "
+            "(exit code 3221225477 / -1073741819); this usually points to a native "
+            "llama.cpp crash rather than context-size memory pressure."
+        )
+    return ""
+
+
+def startup_failure_hint() -> str:
+    if not STARTUP_EXIT_CODES:
+        return ""
+
+    unique_codes = list(dict.fromkeys(STARTUP_EXIT_CODES))
+    if any(startup_exit_code_hint(code) for code in unique_codes):
+        return (
+            "Candidate startup crashed with Windows access violation 0xC0000005 "
+            "(exit code 3221225477 / -1073741819), which usually points to a native "
+            "llama.cpp crash rather than context-size memory pressure. Check the candidate "
+            "logs for the failing binary, model file, or startup flags."
+        )
+
+    joined_codes = ", ".join(str(code) for code in unique_codes)
+    plural = "s" if len(unique_codes) != 1 else ""
+    return f"Candidate startup exited before health checks completed (exit code{plural}: {joined_codes})."
+
+
+def no_working_config_message(role: str, *, prefix: str, log_path: Path, tune_dir: Path) -> str:
+    hint = startup_failure_hint()
+    if hint:
+        return (
+            f"No working {role} tuning configuration started. "
+            f"Check {log_path} and candidate logs under {tune_dir}. {hint}"
+        )
+    return (
+        f"No working {role} tuning configuration started. "
+        f"Check {log_path} and candidate logs under {tune_dir}; lowering {prefix}_CTX_SIZE may be required."
+    )
 
 
 def append_tune_log(line: str) -> None:
@@ -132,7 +184,11 @@ def wait_for_server(
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if proc is not None and proc.poll() is not None:
+            record_startup_exit_code(proc.returncode)
             err(f"  Server exited during startup with code {proc.returncode}")
+            hint = startup_exit_code_hint(proc.returncode)
+            if hint:
+                err(f"  Startup exit detail: {hint}")
             return False
         if proc is not None and log_path is not None:
             pressure = startup_memory_pressure_message(log_path, memory_headroom_mib=memory_headroom_mib)
@@ -397,6 +453,7 @@ def write_tune_file(role: str, config: dict[str, str], body_lines: list[str], *,
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
+    reset_startup_failure_state()
     panel_dir = repo_dir()
     config = load_config(panel_dir, role=args.role, apply_tune=False)
     validate_role_files(args.role, config)
@@ -486,10 +543,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"cache_v={best_cache_v} ({best_score:.2f} tok/s)"
         )
         if best_score <= 0:
-            message = (
-                f"No working {args.role} tuning configuration started. "
-                f"Check {log_path} and candidate logs under {tune_dir}; lowering {prefix}_CTX_SIZE may be required."
-            )
+            message = no_working_config_message(args.role, prefix=prefix, log_path=log_path, tune_dir=tune_dir)
             err(message)
             raise PanelError(message)
         prefix = "CHAT" if args.role == "chat" else "VISION"
@@ -528,10 +582,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     log(f"Best: threads={best_threads} ({best_score:.2f} req/s)")
     if best_score <= 0:
-        message = (
-            f"No working {args.role} tuning configuration started. "
-            f"Check {log_path} and candidate logs under {tune_dir}; lowering EMBED_CTX_SIZE may be required."
-        )
+        message = no_working_config_message(args.role, prefix="EMBED", log_path=log_path, tune_dir=tune_dir)
         err(message)
         raise PanelError(message)
     write_tune_file(

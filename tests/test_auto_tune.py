@@ -22,9 +22,11 @@ from llama_runtime import PanelError
 class AutoTuneFailureHandlingTest(unittest.TestCase):
     def setUp(self) -> None:
         auto_tune.set_tune_log_path(None)
+        auto_tune.reset_startup_failure_state()
 
     def tearDown(self) -> None:
         auto_tune.set_tune_log_path(None)
+        auto_tune.reset_startup_failure_state()
 
     def test_wait_for_server_stops_when_process_exits(self) -> None:
         proc = SimpleNamespace(returncode=42, poll=lambda: 42)
@@ -70,6 +72,23 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
                 self.assertFalse(auto_tune.wait_for_server("127.0.0.1", 9998, 120, proc=proc, log_path=log_path))
 
         terminate_process.assert_called_once_with(proc)
+        request_json.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_wait_for_server_reports_windows_native_crash_exit_code(self) -> None:
+        proc = SimpleNamespace(returncode=3221225477, poll=lambda: 3221225477)
+
+        with (
+            patch("auto_tune.err") as err,
+            patch("auto_tune.request_json") as request_json,
+            patch("auto_tune.time.sleep") as sleep,
+        ):
+            self.assertFalse(auto_tune.wait_for_server("127.0.0.1", 9998, 120, proc=proc))
+
+        messages = "\n".join(str(call.args[0]) for call in err.call_args_list)
+        self.assertIn("Server exited during startup with code 3221225477", messages)
+        self.assertIn("0xC0000005", messages)
+        self.assertIn("access violation", messages)
         request_json.assert_not_called()
         sleep.assert_not_called()
 
@@ -235,6 +254,51 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
             tune_log = panel_dir / "bench-results" / "tuned" / "server-tune.log"
             tune_log_text = tune_log.read_text(encoding="utf-8")
             self.assertIn("not trying lower context sizes", tune_log_text)
+
+    def test_chat_tune_reports_windows_native_crash_as_cause_of_all_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            config = {
+                "LLAMA_HOST": "127.0.0.1",
+                "LLAMA_SERVER_PANEL_DIR": str(panel_dir),
+                "CHAT_MODEL": str(panel_dir / "models" / "chat.gguf"),
+                "CHAT_CTX_SIZE": "4000",
+            }
+
+            def bench_native_crash(*_args, **kwargs) -> float:
+                log_path = kwargs["log_path"]
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("Server exited during startup with code 3221225477\n", encoding="utf-8")
+                auto_tune.record_startup_exit_code(3221225477)
+                return 0.0
+
+            with (
+                patch("auto_tune.repo_dir", return_value=panel_dir),
+                patch("auto_tune.load_config", return_value=config),
+                patch("auto_tune.validate_role_files"),
+                patch("auto_tune.port_in_use", return_value=False),
+                patch("auto_tune.cpu_counts", return_value=(10, 6)),
+                patch("auto_tune.thread_candidates", return_value=[2]),
+                patch("auto_tune.bench_chat_like", side_effect=bench_native_crash) as bench_chat_like,
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(PanelError) as raised:
+                    auto_tune.main(["chat"])
+
+            message = str(raised.exception)
+            self.assertIn("No working chat tuning configuration started", message)
+            self.assertIn("3221225477", message)
+            self.assertIn("0xC0000005", message)
+            self.assertIn("native llama.cpp crash", message)
+
+            contexts = [call.args[1]["CHAT_CTX_SIZE"] for call in bench_chat_like.call_args_list]
+            self.assertEqual(contexts, ["4000", "4000", "4000", "4000"])
+
+            tune_log = panel_dir / "bench-results" / "tuned" / "server-tune.log"
+            tune_log_text = tune_log.read_text(encoding="utf-8")
+            self.assertIn("candidate log:", tune_log_text)
+            self.assertIn("0xC0000005", tune_log_text)
+            self.assertIn("native llama.cpp crash", tune_log_text)
 
     def test_bench_chat_like_estimates_score_from_usage_when_timings_missing(self) -> None:
         proc = SimpleNamespace(returncode=None, poll=lambda: None)
