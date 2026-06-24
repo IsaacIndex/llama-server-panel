@@ -42,6 +42,8 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
             self.assertEqual(config["MODEL_DIR"], str((panel_dir / "models").resolve()))
             self.assertEqual(config["LOG_DIR"], str((panel_dir / "logs").resolve()))
             self.assertEqual(config["VISION_MMPROJ"], "mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf")
+            self.assertEqual(config["JUGGLE_ROLE_PROXY_BIND_HOST"], "127.0.0.1")
+            self.assertEqual(config["JUGGLE_EMBED_PROXY_BIND_HOST"], "")
 
     def test_relative_default_model_paths_resolve_under_model_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -54,6 +56,16 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
                 config["VISION_MMPROJ"],
                 str((panel_dir / "models" / "mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf").resolve()),
             )
+
+    def test_load_config_prefers_gui_role_proxy_bind_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            (panel_dir / "env.local.env").write_text("JUGGLE_EMBED_PROXY_BIND_HOST=127.0.0.1\n", encoding="utf-8")
+            (panel_dir / "env.local.gui.json").write_text('{"JUGGLE_EMBED_PROXY_BIND_HOST": "0.0.0.0"}\n', encoding="utf-8")
+
+            config = load_config(panel_dir, apply_tune=False)
+
+        self.assertEqual(config["JUGGLE_EMBED_PROXY_BIND_HOST"], "0.0.0.0")
 
     def test_popen_session_kwargs_windows_hides_child_console(self) -> None:
         with (

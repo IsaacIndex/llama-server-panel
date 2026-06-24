@@ -101,6 +101,10 @@ def default_config(panel_dir: Optional[Path] = None) -> Dict[str, str]:
         "VISION_THREADS": "8",
         "VISION_CACHE_TYPE_K": "f16",
         "VISION_CACHE_TYPE_V": "f16",
+        "JUGGLE_ROLE_PROXY_BIND_HOST": "127.0.0.1",
+        "JUGGLE_CHAT_PROXY_BIND_HOST": "",
+        "JUGGLE_EMBED_PROXY_BIND_HOST": "",
+        "JUGGLE_VISION_PROXY_BIND_HOST": "",
     }
 
 

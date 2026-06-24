@@ -138,6 +138,18 @@ Default public endpoints:
 - embeddings: `http://127.0.0.1:8081/v1`
 - vision: `http://127.0.0.1:8082/v1`
 
+Role proxies listen on `127.0.0.1` by default. The listener bind address is separate from the supervised llama-server backend address, so you can expose a proxy to a container while keeping the upstream llama-server target on localhost:
+
+```powershell
+.\juggle-models.cmd --embed-proxy-bind 0.0.0.0
+```
+
+or save the same setting in `env.local.env` / `env.local.gui.json`:
+
+```sh
+JUGGLE_EMBED_PROXY_BIND_HOST=0.0.0.0
+```
+
 Default supervised backend ports:
 
 - chat backend: `18180`
@@ -147,6 +159,10 @@ Default supervised backend ports:
 Useful juggler overrides:
 
 - `JUGGLE_CHAT_PUBLIC_FALLBACK_PORT=18080`
+- `JUGGLE_ROLE_PROXY_BIND_HOST=127.0.0.1`
+- `JUGGLE_CHAT_PROXY_BIND_HOST=`
+- `JUGGLE_EMBED_PROXY_BIND_HOST=`
+- `JUGGLE_VISION_PROXY_BIND_HOST=`
 - `JUGGLE_CHAT_BACKEND_PORT=18180`
 - `JUGGLE_EMBED_BACKEND_PORT=18181`
 - `JUGGLE_VISION_BACKEND_PORT=18182`
@@ -170,10 +186,10 @@ Windows:
 .\start-service.cmd
 ```
 
-The gateway listens on `0.0.0.0:8088` by default and keeps supervised backends on `127.0.0.1`. It does not configure TLS or API-key enforcement. Use it only on a trusted private network, or bind it to localhost:
+The gateway listens on `127.0.0.1:8088` by default and keeps supervised backends on `127.0.0.1`. It does not configure TLS or API-key enforcement. Use `0.0.0.0` only on a trusted private network:
 
 ```sh
-./start-service.sh --bind 127.0.0.1
+./start-service.sh --bind 0.0.0.0
 ```
 
 Gateway routing:

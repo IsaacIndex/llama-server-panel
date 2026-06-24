@@ -40,6 +40,7 @@ from model_juggler import (
     GATEWAY_DEFAULT_BIND,
     GATEWAY_DEFAULT_PORT,
     JugglerState,
+    ROLE_PROXY_BIND_DEFAULT,
     build_runtimes,
     check_gateway_port,
     make_gateway_handler,
@@ -69,6 +70,10 @@ CONFIG_KEYS = (
     "LLAMA_SERVER_BIN",
     "MODEL_DIR",
     "LOG_DIR",
+    "JUGGLE_ROLE_PROXY_BIND_HOST",
+    "JUGGLE_CHAT_PROXY_BIND_HOST",
+    "JUGGLE_EMBED_PROXY_BIND_HOST",
+    "JUGGLE_VISION_PROXY_BIND_HOST",
     "CHAT_MODEL",
     "CHAT_ALIAS",
     "CHAT_PORT",
@@ -738,14 +743,16 @@ def run_gui() -> int:
                 state="readonly",
                 width=14,
             ).grid(row=0, column=1, sticky="ew", padx=(8, 16))
-            ttk.Label(juggler, text="Bind", style="Field.TLabel").grid(row=0, column=2, sticky="w")
+            ttk.Label(juggler, text="Gateway bind", style="Field.TLabel").grid(row=0, column=2, sticky="w")
             ttk.Entry(juggler, textvariable=self.gateway_bind, width=14).grid(row=0, column=3, sticky="ew", padx=(8, 16))
             ttk.Label(juggler, text="Port", style="Field.TLabel").grid(row=0, column=4, sticky="w")
             ttk.Entry(juggler, textvariable=self.gateway_port, width=8).grid(row=0, column=5, sticky="w", padx=(8, 16))
-            ttk.Label(juggler, textvariable=self.juggler_status, style="Status.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-            ttk.Checkbutton(juggler, text="Auto-tune", variable=self.auto_tune).grid(row=1, column=2, sticky="w", pady=(8, 0))
+            ttk.Label(juggler, text="Role proxy bind", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+            ttk.Entry(juggler, textvariable=self._var("JUGGLE_ROLE_PROXY_BIND_HOST"), width=14).grid(row=1, column=1, sticky="ew", padx=(8, 16), pady=(8, 0))
+            ttk.Label(juggler, textvariable=self.juggler_status, style="Status.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            ttk.Checkbutton(juggler, text="Auto-tune", variable=self.auto_tune).grid(row=2, column=2, sticky="w", pady=(8, 0))
             juggler_actions = ttk.Frame(juggler, style="Surface.TFrame")
-            juggler_actions.grid(row=1, column=3, columnspan=3, sticky="e", pady=(8, 0))
+            juggler_actions.grid(row=2, column=3, columnspan=3, sticky="e", pady=(8, 0))
             ttk.Button(juggler_actions, text="Start", command=self.start_juggler, style="Accent.TButton").grid(row=0, column=0, padx=(0, 6))
             ttk.Button(juggler_actions, text="Stop", command=self.stop_juggler, style="Secondary.TButton").grid(row=0, column=1, padx=(0, 6))
             ttk.Button(juggler_actions, text="Check", command=self.check_juggler, style="Secondary.TButton").grid(row=0, column=2)
@@ -866,6 +873,8 @@ def run_gui() -> int:
             if role == "vision":
                 self._entry_row(parent, ttk, "MMProj", "VISION_MMPROJ", row, browse_file=True)
                 row += 1
+            self._entry_row(parent, ttk, "Proxy bind", f"JUGGLE_{prefix}_PROXY_BIND_HOST", row)
+            row += 1
 
             compact = ttk.Frame(parent, padding=(0, 4, 0, 0), style="Canvas.TFrame")
             compact.grid(row=row, column=0, columnspan=5, sticky="ew", pady=(0, 4))
@@ -1060,6 +1069,8 @@ def run_gui() -> int:
                 return
             for key in CONFIG_KEYS:
                 self._var(key).set(config.get(key, ""))
+            if not self._var("JUGGLE_ROLE_PROXY_BIND_HOST").get():
+                self._var("JUGGLE_ROLE_PROXY_BIND_HOST").set(ROLE_PROXY_BIND_DEFAULT)
             self.append_output(f"Loaded config from {self.panel_dir}\n")
 
         def current_values(self) -> Dict[str, str]:
@@ -1232,6 +1243,12 @@ def run_gui() -> int:
                     self.append_output(f"Gateway check passed on {self.gateway_bind.get()}:{self.gateway_port.get()}\n")
                 else:
                     self.append_output("Role proxy juggler check passed\n")
+                    for role in ROLES:
+                        runtime = roles[role]
+                        self.append_output(
+                            f"{ROLE_LABELS[role]} proxy: bind {runtime.bind_host}:{runtime.public_port} "
+                            f"-> backend {runtime.host}:{runtime.backend_port}\n"
+                        )
             except Exception as exc:
                 messagebox.showerror("Juggler check failed", str(exc))
 
@@ -1280,13 +1297,13 @@ def run_gui() -> int:
                         runtime = roles[role]
                         if runtime.external:
                             continue
-                        server = ThreadingHTTPServer((runtime.host, runtime.public_port), make_handler(role, state))
+                        server = ThreadingHTTPServer((runtime.bind_host, runtime.public_port), make_handler(role, state))
                         servers.append(server)
                         thread = threading.Thread(target=server.serve_forever, name=f"{role}-proxy", daemon=True)
                         thread.start()
                         threads.append(thread)
                     message = "Role proxies ready: " + ", ".join(
-                        f"{role}=http://{roles[role].host}:{roles[role].public_port}/v1" for role in ROLES
+                        f"{role}=http://{roles[role].bind_host}:{roles[role].public_port}/v1" for role in ROLES
                     )
 
                 self.queue.put(("juggler_started", (JugglerHandle(state=state, servers=servers, threads=threads), message)))

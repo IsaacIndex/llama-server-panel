@@ -146,6 +146,7 @@ class RoleRuntime:
     public_port: int
     backend_port: int
     host: str
+    bind_host: str
     log_path: Path
     external: bool = False
     process: Optional[subprocess.Popen[bytes]] = None
@@ -574,6 +575,37 @@ def parse_int_env(name: str, default: int) -> int:
         return default
 
 
+ROLE_PROXY_BIND_DEFAULT = "127.0.0.1"
+ROLE_PROXY_BIND_KEY = "JUGGLE_ROLE_PROXY_BIND_HOST"
+ROLE_PROXY_BIND_KEYS = {
+    "chat": "JUGGLE_CHAT_PROXY_BIND_HOST",
+    "embed": "JUGGLE_EMBED_PROXY_BIND_HOST",
+    "vision": "JUGGLE_VISION_PROXY_BIND_HOST",
+}
+
+
+def resolve_role_proxy_bind_hosts(
+    *,
+    config: Optional[Dict[str, str]] = None,
+    global_override: Optional[str] = None,
+    role_overrides: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    config = config or load_config(REPO_DIR, apply_tune=False)
+    global_bind = (global_override or config.get(ROLE_PROXY_BIND_KEY) or ROLE_PROXY_BIND_DEFAULT).strip()
+    if not global_bind:
+        global_bind = ROLE_PROXY_BIND_DEFAULT
+    role_overrides = role_overrides or {}
+
+    resolved: Dict[str, str] = {}
+    for role in ("chat", "embed", "vision"):
+        configured = role_overrides.get(role)
+        if configured is None:
+            configured = config.get(ROLE_PROXY_BIND_KEYS[role], "")
+        configured = configured.strip()
+        resolved[role] = configured or global_bind
+    return resolved
+
+
 def bind_exposes_network(bind_host: str) -> bool:
     return bind_host not in {"127.0.0.1", "::1", "localhost"}
 
@@ -778,23 +810,41 @@ def build_runtimes(
     dry_run: bool = False,
     backend_host: Optional[str] = None,
     expose_public_ports: bool = True,
+    role_proxy_bind_host: Optional[str] = None,
+    role_proxy_bind_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, RoleRuntime]:
     chat_env = helper_env("chat", host=backend_host)
     embed_env = helper_env("embed", host=backend_host)
     vision_env = helper_env("vision", host=backend_host)
     host = chat_env["LLAMA_HOST"]
     log_dir = Path(chat_env["LOG_DIR"])
+    bind_hosts = resolve_role_proxy_bind_hosts(
+        global_override=role_proxy_bind_host,
+        role_overrides=role_proxy_bind_overrides,
+    )
 
     if expose_public_ports:
         chat_public, chat_external = choose_public_port(
             "chat",
             int(chat_env["PORT"]),
             parse_int_env("JUGGLE_CHAT_PUBLIC_FALLBACK_PORT", 18080),
-            host,
+            bind_hosts["chat"],
             dry_run=dry_run,
         )
-        embed_public, embed_external = choose_public_port("embed", int(embed_env["PORT"]), None, host, dry_run=dry_run)
-        vision_public, vision_external = choose_public_port("vision", int(vision_env["PORT"]), None, host, dry_run=dry_run)
+        embed_public, embed_external = choose_public_port(
+            "embed",
+            int(embed_env["PORT"]),
+            None,
+            bind_hosts["embed"],
+            dry_run=dry_run,
+        )
+        vision_public, vision_external = choose_public_port(
+            "vision",
+            int(vision_env["PORT"]),
+            None,
+            bind_hosts["vision"],
+            dry_run=dry_run,
+        )
     else:
         chat_public, chat_external = int(chat_env["PORT"]), False
         embed_public, embed_external = int(embed_env["PORT"]), False
@@ -806,6 +856,7 @@ def build_runtimes(
             chat_public,
             parse_int_env("JUGGLE_CHAT_BACKEND_PORT", 18180),
             host,
+            bind_hosts["chat"],
             log_dir / "chat-18180.log",
             chat_external,
             model_path=chat_env.get("MODEL", ""),
@@ -816,6 +867,7 @@ def build_runtimes(
             embed_public,
             parse_int_env("JUGGLE_EMBED_BACKEND_PORT", 18181),
             host,
+            bind_hosts["embed"],
             log_dir / "embed-18181.log",
             embed_external,
             model_path=embed_env.get("MODEL", ""),
@@ -825,6 +877,7 @@ def build_runtimes(
             vision_public,
             parse_int_env("JUGGLE_VISION_BACKEND_PORT", 18182),
             host,
+            bind_hosts["vision"],
             log_dir / "vision-18182.log",
             vision_external,
             model_path=vision_env.get("MODEL", ""),
@@ -836,7 +889,10 @@ def build_runtimes(
 def print_dry_run(roles: Dict[str, RoleRuntime], *, auto_tune: bool) -> None:
     for role in ("chat", "embed", "vision"):
         runtime = roles[role]
-        print(f"{role}: public={runtime.host}:{runtime.public_port} backend={runtime.host}:{runtime.backend_port} external={runtime.external}")
+        print(
+            f"{role}: proxy_bind={runtime.bind_host}:{runtime.public_port} "
+            f"backend={runtime.host}:{runtime.backend_port} external={runtime.external}"
+        )
         if runtime.external:
             print("  using existing llama-server endpoint")
             continue
@@ -862,6 +918,21 @@ def print_gateway_dry_run(
     print(f"auto_tune_on_start={auto_tune}")
 
 
+def print_role_proxy_access(roles: Dict[str, RoleRuntime]) -> None:
+    print("role proxy listeners:")
+    for role in ("chat", "embed", "vision"):
+        runtime = roles[role]
+        if runtime.external:
+            print(f"  {role}: existing endpoint http://{runtime.host}:{runtime.public_port}/v1")
+            continue
+        print(
+            f"  {role}: bind {runtime.bind_host}:{runtime.public_port} "
+            f"-> backend {runtime.host}:{runtime.backend_port}"
+        )
+        if bind_exposes_network(runtime.bind_host):
+            print(f"  WARNING: {role} proxy is exposed beyond localhost and does not enforce an API key.")
+
+
 def serve(roles: Dict[str, RoleRuntime], state: JugglerState) -> None:
     servers: List[ThreadingHTTPServer] = []
     for role in ("chat", "embed", "vision"):
@@ -869,11 +940,14 @@ def serve(roles: Dict[str, RoleRuntime], state: JugglerState) -> None:
         if runtime.external:
             print(f"{role} already available at http://{runtime.host}:{runtime.public_port}/v1")
             continue
-        server = ThreadingHTTPServer((runtime.host, runtime.public_port), make_handler(role, state))
+        server = ThreadingHTTPServer((runtime.bind_host, runtime.public_port), make_handler(role, state))
         servers.append(server)
         thread = threading.Thread(target=server.serve_forever, name=f"{role}-proxy", daemon=True)
         thread.start()
-        print(f"{role} proxy ready at http://{runtime.host}:{runtime.public_port}/v1 -> backend :{runtime.backend_port}")
+        print(
+            f"{role} proxy ready at http://{runtime.bind_host}:{runtime.public_port}/v1 "
+            f"-> backend {runtime.host}:{runtime.backend_port}"
+        )
 
     print("model juggler is running; press Ctrl-C to stop")
     try:
@@ -916,6 +990,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--no-auto-tune", action="store_true", help="do not run missing role auto-tune before first start")
     parser.add_argument("--gateway", action="store_true", help="serve one OpenAI-compatible gateway for all roles")
     parser.add_argument(
+        "--role-proxy-bind",
+        dest="role_proxy_bind",
+        help="default listener bind address for role proxy mode; defaults to JUGGLE_ROLE_PROXY_BIND_HOST or 127.0.0.1",
+    )
+    parser.add_argument("--chat-proxy-bind", dest="chat_proxy_bind", help="listener bind address for the chat role proxy")
+    parser.add_argument("--embed-proxy-bind", dest="embed_proxy_bind", help="listener bind address for the embedding role proxy")
+    parser.add_argument("--vision-proxy-bind", dest="vision_proxy_bind", help="listener bind address for the vision role proxy")
+    parser.add_argument(
         "--gateway-bind",
         "--bind",
         dest="gateway_bind",
@@ -936,6 +1018,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         dry_run=args.dry_run or args.check,
         backend_host="127.0.0.1" if args.gateway else None,
         expose_public_ports=not args.gateway,
+        role_proxy_bind_host=args.role_proxy_bind,
+        role_proxy_bind_overrides={
+            role: value
+            for role, value in {
+                "chat": args.chat_proxy_bind,
+                "embed": args.embed_proxy_bind,
+                "vision": args.vision_proxy_bind,
+            }.items()
+            if value is not None
+        },
     )
     auto_tune = not args.no_auto_tune
 
@@ -961,11 +1053,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     atexit.register(state.shutdown)
 
     if args.check:
+        if args.gateway:
+            print_gateway_access(args.gateway_bind, args.gateway_port, roles)
+        else:
+            print_role_proxy_access(roles)
         state.validate_files()
         if args.gateway:
             check_gateway_port(args.gateway_bind, args.gateway_port)
             print("service gateway configuration check passed")
-            print_gateway_access(args.gateway_bind, args.gateway_port, roles)
         else:
             print("juggler configuration check passed")
         return 0

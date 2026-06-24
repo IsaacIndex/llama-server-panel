@@ -92,6 +92,26 @@ class AutoTuneFailureHandlingTest(unittest.TestCase):
         request_json.assert_not_called()
         sleep.assert_not_called()
 
+    def test_wait_for_server_writes_windows_native_crash_to_candidate_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "candidate.log"
+            log_path.write_text("[panel] launching candidate\n", encoding="utf-8")
+            proc = SimpleNamespace(returncode=3221225477, poll=lambda: 3221225477)
+
+            with (
+                patch("auto_tune.err"),
+                patch("auto_tune.request_json") as request_json,
+                patch("auto_tune.time.sleep") as sleep,
+            ):
+                self.assertFalse(auto_tune.wait_for_server("127.0.0.1", 9998, 120, proc=proc, log_path=log_path))
+
+            text = log_path.read_text(encoding="utf-8")
+            self.assertIn("server exited during startup with code 3221225477", text)
+            self.assertIn("0xC0000005", text)
+            self.assertIn("native llama.cpp crash", text)
+            request_json.assert_not_called()
+            sleep.assert_not_called()
+
     def test_chat_tune_rejects_all_zero_scores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             panel_dir = Path(tmp)

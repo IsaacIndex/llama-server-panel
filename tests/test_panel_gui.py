@@ -127,6 +127,7 @@ class PanelGuiHelpersTest(unittest.TestCase):
                     "LOG_DIR": str(log_dir),
                     "CHAT_MODEL": str(model_dir / "chat.gguf"),
                     "CHAT_ALIAS": "chat-local",
+                    "JUGGLE_EMBED_PROXY_BIND_HOST": "0.0.0.0",
                 },
                 panel_dir=panel_dir,
             )
@@ -134,6 +135,7 @@ class PanelGuiHelpersTest(unittest.TestCase):
             self.assertEqual(overrides["CHAT_MODEL"], "chat.gguf")
             self.assertEqual(overrides["LOG_DIR"], "logs")
             self.assertEqual(overrides["CHAT_ALIAS"], "chat-local")
+            self.assertEqual(overrides["JUGGLE_EMBED_PROXY_BIND_HOST"], "0.0.0.0")
 
     def test_default_assign_key_tracks_role_tabs(self) -> None:
         self.assertEqual(default_assign_key_for_role("chat"), "CHAT_MODEL")

@@ -120,6 +120,14 @@ def append_tune_log(line: str) -> None:
         log_fh.write(f"{line}\n")
 
 
+def append_candidate_log(log_path: Optional[Path], line: str) -> None:
+    if log_path is None:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", errors="replace") as log_fh:
+        log_fh.write(f"[panel] {line}\n")
+
+
 def log(message: str) -> None:
     line = f"[tune] {message}"
     print(line)
@@ -186,9 +194,11 @@ def wait_for_server(
         if proc is not None and proc.poll() is not None:
             record_startup_exit_code(proc.returncode)
             err(f"  Server exited during startup with code {proc.returncode}")
+            append_candidate_log(log_path, f"server exited during startup with code {proc.returncode}")
             hint = startup_exit_code_hint(proc.returncode)
             if hint:
                 err(f"  Startup exit detail: {hint}")
+                append_candidate_log(log_path, f"startup exit detail: {hint}")
             return False
         if proc is not None and log_path is not None:
             pressure = startup_memory_pressure_message(log_path, memory_headroom_mib=memory_headroom_mib)
