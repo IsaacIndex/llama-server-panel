@@ -56,7 +56,12 @@ class PanelError(Exception):
 
 
 def repo_dir() -> Path:
-    return Path(os.environ.get("LLAMA_SERVER_PANEL_DIR", Path(__file__).resolve().parents[1])).resolve()
+    override = os.environ.get("LLAMA_SERVER_PANEL_DIR")
+    if override:
+        return Path(override).resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 def default_llama_server_bin() -> str:

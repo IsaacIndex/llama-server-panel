@@ -244,6 +244,17 @@ def build_gui_overrides(values: Mapping[str, str], *, panel_dir: Path) -> Dict[s
     return overrides
 
 
+def role_proxy_bind_values(values: Mapping[str, str]) -> tuple[str, Dict[str, str]]:
+    return (
+        values.get("JUGGLE_ROLE_PROXY_BIND_HOST", "").strip(),
+        {
+            "chat": values.get("JUGGLE_CHAT_PROXY_BIND_HOST", "").strip(),
+            "embed": values.get("JUGGLE_EMBED_PROXY_BIND_HOST", "").strip(),
+            "vision": values.get("JUGGLE_VISION_PROXY_BIND_HOST", "").strip(),
+        },
+    )
+
+
 def import_model_file(source: Path, model_dir: Path, *, overwrite: bool = False) -> Path:
     source = Path(os.path.expanduser(str(source))).resolve()
     model_dir = Path(os.path.expanduser(str(model_dir))).resolve()
@@ -1225,10 +1236,13 @@ def run_gui() -> int:
                 return
             try:
                 gateway = self.juggler_mode.get() == "gateway"
+                role_proxy_bind_host, role_proxy_bind_overrides = role_proxy_bind_values(self.current_values())
                 roles = build_runtimes(
                     dry_run=True,
                     backend_host="127.0.0.1" if gateway else None,
                     expose_public_ports=not gateway,
+                    role_proxy_bind_host=role_proxy_bind_host,
+                    role_proxy_bind_overrides=role_proxy_bind_overrides,
                 )
                 state = JugglerState(
                     roles,
@@ -1264,10 +1278,13 @@ def run_gui() -> int:
         def _start_juggler_worker(self) -> None:
             try:
                 gateway = self.juggler_mode.get() == "gateway"
+                role_proxy_bind_host, role_proxy_bind_overrides = role_proxy_bind_values(self.current_values())
                 roles = build_runtimes(
                     dry_run=False,
                     backend_host="127.0.0.1" if gateway else None,
                     expose_public_ports=not gateway,
+                    role_proxy_bind_host=role_proxy_bind_host,
+                    role_proxy_bind_overrides=role_proxy_bind_overrides,
                 )
                 state = JugglerState(
                     roles,

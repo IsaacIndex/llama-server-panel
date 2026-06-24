@@ -94,6 +94,22 @@ class ModelJugglerStartupTest(unittest.TestCase):
         self.assertEqual(roles["embed"].bind_host, "0.0.0.0")
         self.assertEqual(roles["embed"].host, "127.0.0.1")
 
+    def test_build_runtimes_loads_role_proxy_bind_from_gui_override_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            (panel_dir / "env.local.gui.json").write_text('{"JUGGLE_EMBED_PROXY_BIND_HOST": "0.0.0.0"}\n', encoding="utf-8")
+
+            with (
+                patch("model_juggler.REPO_DIR", panel_dir),
+                patch("model_juggler.helper_env", side_effect=lambda role, **_kwargs: self._role_env(tmp, role)),
+                patch("model_juggler.port_is_open", return_value=False),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                roles = build_runtimes(dry_run=True)
+
+        self.assertEqual(roles["chat"].bind_host, "127.0.0.1")
+        self.assertEqual(roles["embed"].bind_host, "0.0.0.0")
+
     def test_serve_role_proxy_binds_configured_listener_host(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp)

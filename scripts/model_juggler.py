@@ -33,6 +33,7 @@ from llama_runtime import (
     prepare_llama_server_argv,
     port_in_use as runtime_port_in_use,
     raise_if_process_exited,
+    repo_dir as runtime_repo_dir,
     role_environment,
     tail_log_text,
     terminate_process as terminate_runtime_process,
@@ -66,7 +67,7 @@ class StartupError(Exception):
 
 
 def repo_dir() -> Path:
-    return Path(os.environ.get("LLAMA_SERVER_PANEL_DIR", Path(__file__).resolve().parents[1])).resolve()
+    return runtime_repo_dir()
 
 
 REPO_DIR = repo_dir()

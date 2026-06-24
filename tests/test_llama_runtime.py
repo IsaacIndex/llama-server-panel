@@ -67,6 +67,43 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
 
         self.assertEqual(config["JUGGLE_EMBED_PROXY_BIND_HOST"], "0.0.0.0")
 
+    def test_repo_dir_uses_executable_parent_when_frozen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "installed"
+            meipass_dir = root / "Temp" / "_MEI12345"
+            install_dir.mkdir()
+            meipass_dir.mkdir(parents=True)
+
+            with (
+                patch.object(llama_runtime.sys, "frozen", True, create=True),
+                patch.object(llama_runtime.sys, "executable", str(install_dir / "llama-server-panel.exe")),
+                patch.object(llama_runtime.sys, "_MEIPASS", str(meipass_dir), create=True),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                self.assertEqual(llama_runtime.repo_dir(), install_dir.resolve())
+
+    def test_load_config_uses_frozen_executable_parent_not_meipass_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "installed"
+            meipass_dir = root / "Temp" / "_MEI12345"
+            install_dir.mkdir()
+            meipass_dir.mkdir(parents=True)
+            (install_dir / "env.local.gui.json").write_text('{"JUGGLE_EMBED_PROXY_BIND_HOST": "0.0.0.0"}\n', encoding="utf-8")
+            (meipass_dir / "env.local.gui.json").write_text('{"JUGGLE_EMBED_PROXY_BIND_HOST": "127.0.0.1"}\n', encoding="utf-8")
+
+            with (
+                patch.object(llama_runtime.sys, "frozen", True, create=True),
+                patch.object(llama_runtime.sys, "executable", str(install_dir / "llama-server-panel.exe")),
+                patch.object(llama_runtime.sys, "_MEIPASS", str(meipass_dir), create=True),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                config = load_config(apply_tune=False)
+
+        self.assertEqual(config["LLAMA_SERVER_PANEL_DIR"], str(install_dir.resolve()))
+        self.assertEqual(config["JUGGLE_EMBED_PROXY_BIND_HOST"], "0.0.0.0")
+
     def test_popen_session_kwargs_windows_hides_child_console(self) -> None:
         with (
             patch.object(llama_runtime.os, "name", "nt"),
