@@ -16,7 +16,6 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional
 
@@ -26,11 +25,13 @@ from llama_runtime import (
     build_role_argv,
     launch_diagnostics,
     load_config,
+    normalize_config_paths,
     popen_session_kwargs,
     port_in_use,
     prepare_llama_server_argv,
     raise_if_process_exited,
     repo_dir,
+    role_server_log_path,
     terminate_process,
     tune_file_exists,
     validate_role_files,
@@ -41,6 +42,7 @@ from model_juggler import (
     GATEWAY_DEFAULT_PORT,
     JugglerState,
     ROLE_PROXY_BIND_DEFAULT,
+    ThreadingHTTPServer,
     build_runtimes,
     check_gateway_port,
     make_gateway_handler,
@@ -103,6 +105,7 @@ PATH_KEYS = {
 }
 API_TIMEOUT_SECONDS = 3600
 LOG_TAIL_BYTES = 64 * 1024
+LOG_REFRESH_INTERVAL_MS = 1000
 AUTO_TUNE_CANDIDATE_TAIL_BYTES = 8 * 1024
 AUTO_TUNE_CANDIDATE_LOG_LIMIT = 3
 MAX_TEST_IMAGE_BYTES = 20 * 1024 * 1024
@@ -422,9 +425,79 @@ def require_role(role: str) -> None:
         raise PanelError(f"Unsupported role: {role}")
 
 
+def log_stem_for_model(model_path: str, fallback: str) -> str:
+    stem = Path(model_path).stem if model_path else fallback
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return stem or fallback
+
+
 def role_log_path(config: Mapping[str, str], role: str) -> Path:
     require_role(role)
+    prefix = ROLE_PREFIX[role]
+    model_path = str(config.get(f"{prefix}_MODEL", "")).strip()
+    if not model_path:
+        return legacy_role_log_path(config, role)
+    return Path(config["LOG_DIR"]) / f"{role}-{log_stem_for_model(model_path, role)}-gui.log"
+
+
+def legacy_role_log_path(config: Mapping[str, str], role: str) -> Path:
+    require_role(role)
     return Path(config["LOG_DIR"]) / f"{role}-gui.log"
+
+
+JUGGLER_BACKEND_LOG_PORTS = {
+    "chat": ("JUGGLE_CHAT_BACKEND_PORT", "18180"),
+    "embed": ("JUGGLE_EMBED_BACKEND_PORT", "18181"),
+    "vision": ("JUGGLE_VISION_BACKEND_PORT", "18182"),
+}
+
+
+def juggler_backend_log_path(config: Mapping[str, str], role: str) -> Path:
+    require_role(role)
+    key, default = JUGGLER_BACKEND_LOG_PORTS[role]
+    port = os.environ.get(key) or default
+    prefix = ROLE_PREFIX[role]
+    model_path = str(config.get(f"{prefix}_MODEL", "")).strip()
+    if not model_path:
+        return legacy_juggler_backend_log_path(config, role)
+    return Path(config["LOG_DIR"]) / f"{role}-{log_stem_for_model(model_path, role)}-{port}.log"
+
+
+def legacy_juggler_backend_log_path(config: Mapping[str, str], role: str) -> Path:
+    require_role(role)
+    key, default = JUGGLER_BACKEND_LOG_PORTS[role]
+    port = os.environ.get(key) or default
+    return Path(config["LOG_DIR"]) / f"{role}-{port}.log"
+
+
+def active_role_model(config: Mapping[str, str], role: str) -> str:
+    require_role(role)
+    prefix = ROLE_PREFIX[role]
+    model_path = str(config.get(f"{prefix}_MODEL", "")).strip()
+    if not model_path:
+        return "<unset>"
+    return Path(model_path).name
+
+
+def role_log_sources(config: Mapping[str, str], role: str) -> list[tuple[str, Path]]:
+    require_role(role)
+    candidates: list[tuple[str, Path, bool]] = [
+        ("GUI/server log", role_log_path(config, role), True),
+        ("legacy GUI/server log", legacy_role_log_path(config, role), False),
+        ("direct launcher log", role_server_log_path(config, role), False),
+        ("Juggler backend log", juggler_backend_log_path(config, role), True),
+        ("legacy Juggler backend log", legacy_juggler_backend_log_path(config, role), False),
+    ]
+    sources: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for label, path, always_include in candidates:
+        if path in seen:
+            continue
+        if not always_include and not path.is_file():
+            continue
+        seen.add(path)
+        sources.append((label, path))
+    return sources
 
 
 def auto_tune_log_path(panel_dir: Path) -> Path:
@@ -488,11 +561,15 @@ def auto_tune_candidate_log_display_text(
 
 
 def role_log_display_text(config: Mapping[str, str], role: str, *, panel_dir: Path, max_bytes: int = LOG_TAIL_BYTES) -> str:
-    log_path = role_log_path(config, role)
     sections = [
-        f"== {ROLE_LABELS[role]} GUI/server log: {log_path} ==\n"
-        f"{tail_file_text(log_path, max_bytes=max_bytes)}"
+        f"== {ROLE_LABELS[role]} active model ==\n"
+        f"{active_role_model(config, role)}\n"
     ]
+    for label, log_path in role_log_sources(config, role):
+        sections.append(
+            f"== {ROLE_LABELS[role]} {label}: {log_path} ==\n"
+            f"{tail_file_text(log_path, max_bytes=max_bytes)}"
+        )
     tune_path = auto_tune_log_path(panel_dir)
     if tune_path.is_file():
         tune_text = tail_file_text(tune_path, max_bytes=max_bytes)
@@ -508,6 +585,13 @@ def role_log_display_text(config: Mapping[str, str], role: str, *, panel_dir: Pa
             )
         )
     return "\n".join(sections)
+
+
+def log_config_from_values(panel_dir: Path, values: Mapping[str, str]) -> Dict[str, str]:
+    config = load_config(panel_dir, apply_tune=False)
+    config.update(build_gui_overrides(values, panel_dir=panel_dir))
+    normalize_config_paths(config)
+    return config
 
 
 def process_running(proc: Optional[subprocess.Popen[bytes]]) -> bool:
@@ -664,7 +748,7 @@ def run_gui() -> int:
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
             self.root.after(400, self.poll_queue)
             self.root.after(1500, self.refresh_status)
-            self.root.after(1000, self.refresh_logs)
+            self.root.after(LOG_REFRESH_INTERVAL_MS, self.refresh_logs)
 
         def _build_layout(self, ttk, tk, filedialog, messagebox) -> None:
             main = ttk.Frame(self.root, padding=0, style="Canvas.TFrame")
@@ -1227,6 +1311,7 @@ def run_gui() -> int:
             self._var(key).set(str(path))
             if self.save_config():
                 self.append_output(f"Assigned {path.name} to {key}\n")
+                self.refresh_logs_once()
 
         def check_role(self, role: str) -> None:
             if not self.save_config():
@@ -1476,19 +1561,23 @@ def run_gui() -> int:
 
         def refresh_logs_once(self) -> None:
             try:
-                config = load_config(self.panel_dir, apply_tune=False)
+                config = log_config_from_values(self.panel_dir, self.current_values())
             except Exception as exc:
                 for text in self.log_texts.values():
                     self.replace_log_text(text, f"Could not load log configuration: {exc}\n")
                 return
             for role, text in self.log_texts.items():
-                self.replace_log_text(text, role_log_display_text(config, role, panel_dir=self.panel_dir))
+                try:
+                    display_text = role_log_display_text(config, role, panel_dir=self.panel_dir)
+                except Exception as exc:
+                    display_text = f"Could not refresh {ROLE_LABELS[role]} logs: {exc}\n"
+                self.replace_log_text(text, display_text)
 
         def refresh_logs(self) -> None:
             try:
                 self.refresh_logs_once()
             finally:
-                self.root.after(2000, self.refresh_logs)
+                self.root.after(LOG_REFRESH_INTERVAL_MS, self.refresh_logs)
 
         def poll_queue(self) -> None:
             while True:
@@ -1518,8 +1607,10 @@ def run_gui() -> int:
                     self.juggler_handle = handle
                     self.juggler_status.set("Running")
                     self.append_output(f"{message}\n")
+                    self.refresh_logs_once()
                 elif kind == "juggler_error":
                     self.juggler_status.set("Stopped")
+                    self.refresh_logs_once()
                     messagebox.showerror("Juggler start failed", str(payload))
                 elif kind == "update_check_result":
                     result = payload

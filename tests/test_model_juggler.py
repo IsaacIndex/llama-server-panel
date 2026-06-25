@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -23,6 +23,36 @@ from model_juggler import RoleRuntime, StartupError, build_runtimes, print_dry_r
 
 
 class ModelJugglerStartupTest(unittest.TestCase):
+    def test_threading_server_suppresses_client_reset_tracebacks(self) -> None:
+        server = model_juggler.ThreadingHTTPServer.__new__(model_juggler.ThreadingHTTPServer)
+        stderr = io.StringIO()
+
+        try:
+            raise ConnectionResetError("client closed")
+        except ConnectionResetError:
+            with redirect_stderr(stderr):
+                server.handle_error(object(), ("127.0.0.1", 12345))
+
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_streaming_relay_treats_client_reset_as_disconnect(self) -> None:
+        chunks = [b"partial response", b""]
+
+        response = SimpleNamespace(
+            status=200,
+            reason="OK",
+            getheaders=lambda: [("Content-Type", "application/json")],
+            read=lambda _size: chunks.pop(0),
+        )
+        handler = Mock()
+        handler.wfile.write.side_effect = ConnectionResetError("client closed")
+
+        model_juggler._relay_streaming_response(handler, response)
+
+        handler.send_response.assert_called_once_with(200, "OK")
+        handler.wfile.write.assert_called_once_with(b"partial response")
+        self.assertTrue(handler.close_connection)
+
     def test_wait_ready_fails_fast_when_process_exits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "chat.log"
@@ -111,6 +141,31 @@ class ModelJugglerStartupTest(unittest.TestCase):
         self.assertEqual(roles["chat"].bind_host, "127.0.0.1")
         self.assertEqual(roles["embed"].bind_host, "0.0.0.0")
 
+    def test_build_runtimes_uses_model_specific_backend_log_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {
+                "JUGGLE_ROLE_PROXY_BIND_HOST": "127.0.0.1",
+                "JUGGLE_CHAT_PROXY_BIND_HOST": "",
+                "JUGGLE_EMBED_PROXY_BIND_HOST": "",
+                "JUGGLE_VISION_PROXY_BIND_HOST": "",
+            }
+
+            def role_env(role: str, **_kwargs: object) -> dict[str, str]:
+                env = self._role_env(tmp, role)
+                env["MODEL"] = f"/models/{role}-alpha.gguf"
+                return env
+
+            with (
+                patch("model_juggler.helper_env", side_effect=role_env),
+                patch("model_juggler.load_config", return_value=config),
+                patch("model_juggler.port_is_open", return_value=False),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                roles = build_runtimes(dry_run=True)
+
+        self.assertEqual(roles["chat"].log_path.name, "chat-chat-alpha-18180.log")
+        self.assertEqual(roles["embed"].log_path.name, "embed-embed-alpha-18181.log")
+
     def test_serve_role_proxy_binds_configured_listener_host(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
@@ -166,6 +221,32 @@ class ModelJugglerStartupTest(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("embed: proxy_bind=0.0.0.0:8081 backend=127.0.0.1:18181", text)
+
+    def test_role_proxy_models_request_returns_role_model_without_backend(self) -> None:
+        runtime = RoleRuntime(
+            "embed",
+            8081,
+            18181,
+            "127.0.0.1",
+            "0.0.0.0",
+            Path("/tmp/embed.log"),
+            model_path="/models/Qwen3-Embedding-4B-Q6_K.gguf",
+        )
+        state = SimpleNamespace(roles={"embed": runtime})
+        handler_class = model_juggler.make_handler("embed", state)
+        handler = handler_class.__new__(handler_class)
+        handler.path = "/v1/models"
+
+        with (
+            patch("model_juggler.write_json") as write_json,
+            patch("model_juggler.proxy_request") as proxy_request,
+        ):
+            handler.do_GET()
+
+        proxy_request.assert_not_called()
+        write_json.assert_called_once()
+        self.assertEqual(write_json.call_args.args[1], 200)
+        self.assertEqual(write_json.call_args.args[2]["data"][0]["id"], "Qwen3-Embedding-4B-Q6_K.gguf")
 
     def test_main_dry_run_forwards_role_proxy_bind_overrides(self) -> None:
         roles: dict[str, RoleRuntime] = {}

@@ -27,6 +27,7 @@ from panel_gui import (
     gui_override_path,
     image_data_url,
     import_model_file,
+    log_config_from_values,
     model_dir_from_value,
     model_config_value,
     post_json,
@@ -254,6 +255,35 @@ class PanelGuiHelpersTest(unittest.TestCase):
             with self.assertRaises(PanelError):
                 role_log_path(config, "rerank")
 
+    def test_role_log_path_tracks_selected_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+
+            first = role_log_path({"LOG_DIR": str(log_dir), "CHAT_MODEL": "/models/alpha.gguf"}, "chat")
+            second = role_log_path({"LOG_DIR": str(log_dir), "CHAT_MODEL": "/models/beta.gguf"}, "chat")
+
+        self.assertEqual(first, log_dir / "chat-alpha-gui.log")
+        self.assertEqual(second, log_dir / "chat-beta-gui.log")
+
+    def test_log_config_from_values_uses_current_unsaved_model_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            model_dir = panel_dir / "models"
+            log_dir = panel_dir / "logs"
+            model_dir.mkdir()
+            log_dir.mkdir()
+
+            config = log_config_from_values(
+                panel_dir,
+                {
+                    "MODEL_DIR": str(model_dir),
+                    "LOG_DIR": str(log_dir),
+                    "CHAT_MODEL": str(model_dir / "current.gguf"),
+                },
+            )
+
+        self.assertEqual(role_log_path(config, "chat").name, "chat-current-gui.log")
+
     def test_tail_file_text_handles_missing_and_truncates_large_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "chat-gui.log"
@@ -284,6 +314,31 @@ class PanelGuiHelpersTest(unittest.TestCase):
             self.assertIn("server startup", text)
             self.assertIn("Auto-tune log", text)
             self.assertIn("auto tune candidate", text)
+
+    def test_role_log_display_includes_model_specific_and_legacy_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            log_dir.mkdir()
+            (log_dir / "chat-alpha-gui.log").write_text("current gui log\n", encoding="utf-8")
+            (log_dir / "chat-alpha-18180.log").write_text("current juggler log\n", encoding="utf-8")
+            (log_dir / "chat-gui.log").write_text("legacy gui log\n", encoding="utf-8")
+            (log_dir / "chat.log").write_text("direct launcher log\n", encoding="utf-8")
+            (log_dir / "chat-18180.log").write_text("legacy juggler log\n", encoding="utf-8")
+
+            text = role_log_display_text(
+                {"LOG_DIR": str(log_dir), "CHAT_MODEL": "/models/alpha.gguf"},
+                "chat",
+                panel_dir=panel_dir,
+            )
+
+        self.assertIn("== Chat active model ==", text)
+        self.assertIn("alpha.gguf", text)
+        self.assertIn("current gui log", text)
+        self.assertIn("current juggler log", text)
+        self.assertIn("legacy gui log", text)
+        self.assertIn("direct launcher log", text)
+        self.assertIn("legacy juggler log", text)
 
     def test_role_log_display_includes_auto_tune_candidate_log_tails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

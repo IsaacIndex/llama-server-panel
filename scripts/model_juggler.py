@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlsplit
@@ -67,6 +67,11 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionAbortedError,
+    ConnectionResetError,
+)
 
 
 class ModelBusy(Exception):
@@ -75,6 +80,16 @@ class ModelBusy(Exception):
 
 class StartupError(Exception):
     pass
+
+
+class ThreadingHTTPServer(_ThreadingHTTPServer):
+    """Threaded server that keeps benign client disconnects out of stderr."""
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        exc_type, exc, _traceback = sys.exc_info()
+        if exc_type is not None and isinstance(exc, CLIENT_DISCONNECT_ERRORS):
+            return
+        super().handle_error(request, client_address)
 
 
 def repo_dir() -> Path:
@@ -186,6 +201,17 @@ class LocalAddress:
 def mirror_runtime_output(proc: subprocess.Popen[bytes], log_path: Path, *, stream: object = None) -> None:
     with log_path.open("ab", buffering=0) as log_fh:
         mirror_process_output(proc, log_fh, stream=stream)
+
+
+def log_stem_for_model(model_path: str, fallback: str) -> str:
+    stem = Path(model_path).stem if model_path else fallback
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return stem or fallback
+
+
+def backend_log_path(log_dir: Path, role: str, backend_port: int, model_path: str) -> Path:
+    stem = log_stem_for_model(model_path, role)
+    return log_dir / f"{role}-{stem}-{backend_port}.log"
 
 
 class JugglerState:
@@ -454,26 +480,29 @@ def _forward_headers(handler: BaseHTTPRequestHandler, runtime: "RoleRuntime", ba
 
 
 def _relay_streaming_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPResponse) -> None:
-    handler.send_response(response.status, response.reason)
-    sent_connection = False
-    for key, value in response.getheaders():
-        lower_key = key.lower()
-        if lower_key in HOP_BY_HOP_HEADERS:
-            continue
-        if lower_key == "connection":
-            sent_connection = True
-            continue
-        handler.send_header(key, value)
-    if not sent_connection:
-        handler.send_header("Connection", "close")
-    handler.end_headers()
+    try:
+        handler.send_response(response.status, response.reason)
+        sent_connection = False
+        for key, value in response.getheaders():
+            lower_key = key.lower()
+            if lower_key in HOP_BY_HOP_HEADERS:
+                continue
+            if lower_key == "connection":
+                sent_connection = True
+                continue
+            handler.send_header(key, value)
+        if not sent_connection:
+            handler.send_header("Connection", "close")
+        handler.end_headers()
 
-    while True:
-        chunk = response.read(65536)
-        if not chunk:
-            break
-        handler.wfile.write(chunk)
-        handler.wfile.flush()
+        while True:
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+            handler.wfile.flush()
+    except CLIENT_DISCONNECT_ERRORS:
+        handler.close_connection = True
 
 
 def _relay_buffered_response(
@@ -483,29 +512,32 @@ def _relay_buffered_response(
     raw_headers: List[tuple],
     body: bytes,
 ) -> None:
-    handler.send_response(status, reason)
-    sent_connection = False
-    sent_length = False
-    for key, value in raw_headers:
-        lower_key = key.lower()
-        if lower_key in HOP_BY_HOP_HEADERS:
-            continue
-        if lower_key == "connection":
-            sent_connection = True
-            continue
-        if lower_key == "content-length":
-            # We buffered the body, so emit our own accurate length.
-            continue
-        handler.send_header(key, value)
-    handler.send_header("Content-Length", str(len(body)))
-    sent_length = True
-    if not sent_connection:
-        handler.send_header("Connection", "close")
-    handler.end_headers()
-    if body:
-        handler.wfile.write(body)
-        handler.wfile.flush()
-    _ = sent_length
+    try:
+        handler.send_response(status, reason)
+        sent_connection = False
+        sent_length = False
+        for key, value in raw_headers:
+            lower_key = key.lower()
+            if lower_key in HOP_BY_HOP_HEADERS:
+                continue
+            if lower_key == "connection":
+                sent_connection = True
+                continue
+            if lower_key == "content-length":
+                # We buffered the body, so emit our own accurate length.
+                continue
+            handler.send_header(key, value)
+        handler.send_header("Content-Length", str(len(body)))
+        sent_length = True
+        if not sent_connection:
+            handler.send_header("Connection", "close")
+        handler.end_headers()
+        if body:
+            handler.wfile.write(body)
+            handler.wfile.flush()
+        _ = sent_length
+    except CLIENT_DISCONNECT_ERRORS:
+        handler.close_connection = True
 
 
 def _is_embed_batch_error(status: int, body: bytes) -> bool:
@@ -651,6 +683,8 @@ def proxy_request(
         write_error(handler, 503, f"model switch busy: {exc}")
     except StartupError as exc:
         write_error(handler, 503, str(exc))
+    except CLIENT_DISCONNECT_ERRORS:
+        handler.close_connection = True
     except Exception as exc:
         write_error(handler, 502, f"proxy error: {exc}")
     finally:
@@ -689,6 +723,20 @@ def role_model_ids(runtime: RoleRuntime) -> set[str]:
         ids.add(runtime.model_path)
         ids.add(Path(runtime.model_path).name)
     return {value for value in ids if value}
+
+
+def role_models_payload(runtime: RoleRuntime) -> Dict[str, object]:
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": role_model_id(runtime),
+                "object": "model",
+                "created": 0,
+                "owned_by": "llama.cpp",
+            }
+        ],
+    }
 
 
 def combined_models_payload(roles: Dict[str, RoleRuntime]) -> Dict[str, object]:
@@ -789,6 +837,9 @@ def make_handler(role: str, state: JugglerState):
         protocol_version = "HTTP/1.1"
 
         def do_GET(self) -> None:
+            if urlsplit(self.path).path == "/v1/models":
+                write_json(self, 200, role_models_payload(state.roles[role]))
+                return
             proxy_request(self, state, role)
 
         def do_POST(self) -> None:
@@ -1088,37 +1139,44 @@ def build_runtimes(
         embed_public, embed_external = int(embed_env["PORT"]), False
         vision_public, vision_external = int(vision_env["PORT"]), False
 
+    chat_backend_port = parse_int_env("JUGGLE_CHAT_BACKEND_PORT", 18180)
+    embed_backend_port = parse_int_env("JUGGLE_EMBED_BACKEND_PORT", 18181)
+    vision_backend_port = parse_int_env("JUGGLE_VISION_BACKEND_PORT", 18182)
+    chat_model_path = chat_env.get("MODEL", "")
+    embed_model_path = embed_env.get("MODEL", "")
+    vision_model_path = vision_env.get("MODEL", "")
+
     return {
         "chat": RoleRuntime(
             "chat",
             chat_public,
-            parse_int_env("JUGGLE_CHAT_BACKEND_PORT", 18180),
+            chat_backend_port,
             host,
             bind_hosts["chat"],
-            log_dir / "chat-18180.log",
+            backend_log_path(log_dir, "chat", chat_backend_port, chat_model_path),
             chat_external,
-            model_path=chat_env.get("MODEL", ""),
+            model_path=chat_model_path,
             alias=chat_env.get("ALIAS", ""),
         ),
         "embed": RoleRuntime(
             "embed",
             embed_public,
-            parse_int_env("JUGGLE_EMBED_BACKEND_PORT", 18181),
+            embed_backend_port,
             host,
             bind_hosts["embed"],
-            log_dir / "embed-18181.log",
+            backend_log_path(log_dir, "embed", embed_backend_port, embed_model_path),
             embed_external,
-            model_path=embed_env.get("MODEL", ""),
+            model_path=embed_model_path,
         ),
         "vision": RoleRuntime(
             "vision",
             vision_public,
-            parse_int_env("JUGGLE_VISION_BACKEND_PORT", 18182),
+            vision_backend_port,
             host,
             bind_hosts["vision"],
-            log_dir / "vision-18182.log",
+            backend_log_path(log_dir, "vision", vision_backend_port, vision_model_path),
             vision_external,
-            model_path=vision_env.get("MODEL", ""),
+            model_path=vision_model_path,
             alias=vision_env.get("ALIAS", ""),
         ),
     }
