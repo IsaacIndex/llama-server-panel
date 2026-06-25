@@ -377,7 +377,7 @@ if not errorlevel 1 (
   goto wait
 )
 {copy_commands}
-start "" "%EXE_PATH%"
+start "" /B "%EXE_PATH%"
 """
 
     copy_commands = "\n".join(
@@ -398,6 +398,13 @@ chmod +x "$install_dir/{executable_name()}"
 """
 
 
+def installer_process_kwargs() -> dict[str, int]:
+    if os.name != "nt":
+        return {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": creationflags} if creationflags else {}
+
+
 def start_installer_process(source_dir: Path, install_dir: Path, executable: Path) -> None:
     suffix = ".cmd" if os.name == "nt" else ".sh"
     script_path = Path(tempfile.mkdtemp(prefix="llama-panel-install-")) / f"install-update{suffix}"
@@ -413,6 +420,7 @@ def start_installer_process(source_dir: Path, install_dir: Path, executable: Pat
         subprocess.Popen(
             ["cmd", "/c", str(script_path), str(os.getpid()), str(source_dir), str(install_dir), str(executable)],
             close_fds=True,
+            **installer_process_kwargs(),
         )
 
 

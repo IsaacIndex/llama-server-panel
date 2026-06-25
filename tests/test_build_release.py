@@ -19,6 +19,19 @@ from update_checker import VERSION_FILE_NAME, VersionSource
 
 
 class BuildReleaseTest(unittest.TestCase):
+    def test_pyinstaller_command_uses_windowed_mode_on_windows(self) -> None:
+        dist_platform_dir = Path("dist") / "windows-x64"
+        with patch.object(build_release.os, "name", "nt"):
+            command = build_release.pyinstaller_command(dist_platform_dir)
+
+        self.assertIn("--windowed", command)
+
+    def test_pyinstaller_command_keeps_console_available_on_non_windows(self) -> None:
+        with patch.object(build_release.os, "name", "posix"):
+            command = build_release.pyinstaller_command(Path("dist") / "macos-arm64")
+
+        self.assertNotIn("--windowed", command)
+
     def test_release_version_prefers_github_tag_ref(self) -> None:
         with patch.dict(os.environ, {"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v9.8.7"}):
             self.assertEqual(build_release.release_version(), "v9.8.7")

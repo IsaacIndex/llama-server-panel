@@ -36,15 +36,7 @@ def executable_name() -> str:
     return f"{APP_NAME}.exe" if os.name == "nt" else APP_NAME
 
 
-def run_pyinstaller() -> Path:
-    if importlib.util.find_spec("PyInstaller") is None:
-        raise RuntimeError("PyInstaller is not installed. Run: python -m pip install -r requirements-build.txt")
-
-    dist_platform_dir = DIST_DIR / platform_slug()
-    shutil.rmtree(dist_platform_dir, ignore_errors=True)
-    dist_platform_dir.mkdir(parents=True, exist_ok=True)
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-
+def pyinstaller_command(dist_platform_dir: Path) -> list[str]:
     command = [
         sys.executable,
         "-m",
@@ -72,6 +64,21 @@ def run_pyinstaller() -> Path:
         str(BUILD_DIR),
         str(ROOT / "scripts" / "panel_gui.py"),
     ]
+    if os.name == "nt":
+        command.insert(6, "--windowed")
+    return command
+
+
+def run_pyinstaller() -> Path:
+    if importlib.util.find_spec("PyInstaller") is None:
+        raise RuntimeError("PyInstaller is not installed. Run: python -m pip install -r requirements-build.txt")
+
+    dist_platform_dir = DIST_DIR / platform_slug()
+    shutil.rmtree(dist_platform_dir, ignore_errors=True)
+    dist_platform_dir.mkdir(parents=True, exist_ok=True)
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+
+    command = pyinstaller_command(dist_platform_dir)
     subprocess.run(command, cwd=str(ROOT), check=True)
 
     executable = dist_platform_dir / executable_name()

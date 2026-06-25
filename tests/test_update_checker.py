@@ -31,6 +31,7 @@ from update_checker import (
     extract_update_archive,
     fetch_latest_release,
     format_byte_count,
+    installer_process_kwargs,
     parse_latest_release,
     parse_checksum_file,
     resolve_update_repo,
@@ -266,7 +267,20 @@ class UpdateCheckerTest(unittest.TestCase):
         self.assertIn('tasklist /FI "PID eq %PID%"', script)
         self.assertIn("timeout /t 1 /nobreak >nul", script)
         self.assertIn('if exist "%SOURCE_DIR%\\llama-server-panel.exe" copy /Y', script)
-        self.assertIn('start "" "%EXE_PATH%"', script)
+        self.assertIn('start "" /B "%EXE_PATH%"', script)
+
+    def test_installer_process_kwargs_windows_hides_cmd_window(self) -> None:
+        with (
+            patch("update_checker.os.name", "nt"),
+            patch.object(sys.modules["update_checker"].subprocess, "CREATE_NO_WINDOW", 0x8000000, create=True),
+        ):
+            kwargs = installer_process_kwargs()
+
+        self.assertEqual(kwargs, {"creationflags": 0x8000000})
+
+    def test_installer_process_kwargs_posix_empty(self) -> None:
+        with patch("update_checker.os.name", "posix"):
+            self.assertEqual(installer_process_kwargs(), {})
 
     def test_resolve_update_repo_rejects_invalid_override(self) -> None:
         with self.assertRaises(UpdateCheckError):

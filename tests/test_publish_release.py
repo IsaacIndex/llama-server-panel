@@ -13,7 +13,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from publish_release import ensure_clean_worktree, next_release_tag, resolve_release_tag
+from publish_release import ensure_clean_worktree, next_release_tag, resolve_release_tag, wait_for_ci
 
 
 def completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -40,6 +40,48 @@ class PublishReleaseTest(unittest.TestCase):
         with redirect_stdout(StringIO()):
             with self.assertRaisesRegex(RuntimeError, "Working tree is not clean"):
                 ensure_clean_worktree(lambda command: completed(" M scripts/panel_gui.py\n"))
+
+    def test_wait_for_ci_returns_when_latest_run_succeeds(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command == ["git", "rev-parse", "HEAD"]:
+                return completed("abc123def456\n")
+            if command[:3] == ["gh", "run", "list"]:
+                return completed('[{"status":"completed","conclusion":"success","url":"https://example.test/run"}]')
+            self.fail(f"unexpected command: {command}")
+
+        with redirect_stdout(StringIO()):
+            wait_for_ci("CI", timeout_seconds=1, poll_interval_seconds=1, runner=runner, sleeper=lambda _: None)
+
+        self.assertEqual(calls[0], ["git", "rev-parse", "HEAD"])
+        self.assertIn("--commit", calls[1])
+        self.assertIn("abc123def456", calls[1])
+
+    def test_wait_for_ci_fails_when_latest_run_fails(self) -> None:
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command == ["git", "rev-parse", "HEAD"]:
+                return completed("abc123def456\n")
+            if command[:3] == ["gh", "run", "list"]:
+                return completed('[{"status":"completed","conclusion":"failure"}]')
+            self.fail(f"unexpected command: {command}")
+
+        with redirect_stdout(StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "completed with conclusion failure"):
+                wait_for_ci("CI", timeout_seconds=1, poll_interval_seconds=1, runner=runner, sleeper=lambda _: None)
+
+    def test_wait_for_ci_times_out_before_publishing(self) -> None:
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command == ["git", "rev-parse", "HEAD"]:
+                return completed("abc123def456\n")
+            if command[:3] == ["gh", "run", "list"]:
+                return completed('[{"status":"in_progress","conclusion":""}]')
+            self.fail(f"unexpected command: {command}")
+
+        with redirect_stdout(StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "Timed out waiting for CI"):
+                wait_for_ci("CI", timeout_seconds=0, poll_interval_seconds=1, runner=runner, sleeper=lambda _: None)
 
 
 if __name__ == "__main__":
