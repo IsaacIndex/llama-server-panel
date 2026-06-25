@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -177,6 +178,144 @@ class ModelJugglerStartupTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(build.call_args.kwargs["role_proxy_bind_overrides"], {"embed": "0.0.0.0"})
+
+
+class EmbedBatchEscalationTest(unittest.TestCase):
+    def test_detects_too_large_error(self) -> None:
+        body = b'{"error":{"message":"input (4391 tokens) is too large to process. increase the physical batch"}}'
+        self.assertTrue(model_juggler._is_embed_batch_error(500, body))
+        self.assertTrue(model_juggler._is_embed_batch_error(400, body))
+
+    def test_ignores_success_and_unrelated_errors(self) -> None:
+        self.assertFalse(model_juggler._is_embed_batch_error(200, b'{"data":[]}'))
+        self.assertFalse(model_juggler._is_embed_batch_error(500, b'{"error":"boom"}'))
+
+    def test_parses_required_tokens(self) -> None:
+        body = b"input (4391 tokens) is too large to process. increase the physical batch"
+        self.assertEqual(model_juggler._required_tokens_from_error(body), 4391)
+        self.assertIsNone(model_juggler._required_tokens_from_error(b"too large to process"))
+
+    def _fake_conn(self, status: int, body: bytes):
+        read_sizes: list[object] = []
+        chunks = [body, b""]
+
+        def read(size: object = None) -> bytes:
+            read_sizes.append(size)
+            return chunks.pop(0) if chunks else b""
+
+        response = SimpleNamespace(
+            status=status,
+            reason="OK" if status < 400 else "Error",
+            getheaders=lambda: [("Content-Type", "application/json")],
+            read=read,
+            read_sizes=read_sizes,
+        )
+        conn = Mock()
+        conn.getresponse.return_value = response
+        conn.response = response
+        return conn
+
+    def _fake_handler(self):
+        handler = Mock()
+        handler.headers = {"Content-Type": "application/json"}
+        handler.command = "POST"
+        handler.path = "/v1/embeddings"
+        return handler
+
+    def test_escalates_then_reverts_on_too_large(self) -> None:
+        too_large = b'{"error":{"message":"input (4391 tokens) is too large to process. increase the physical batch"}}'
+        ok = b'{"data":[{"embedding":[0.1,0.2]}]}'
+
+        runtime = RoleRuntime("embed", 8081, 18181, "127.0.0.1", "127.0.0.1", Path("/tmp/embed.log"))
+        state = Mock()
+        state.roles = {"embed": runtime}
+        state.request_timeout = 5
+        state.embed_configured_batch_size.return_value = 4096
+        restarts: list = []
+        events: list[str] = []
+
+        def restart(value):
+            restarts.append(value)
+            events.append(f"restart:{value}")
+            return 18181
+
+        state.begin_embed_backend_request.side_effect = lambda: events.append("begin")
+        state.finish_embed_backend_request.side_effect = lambda: events.append("finish")
+        state.restart_embed_with_batch.side_effect = restart
+
+        conns = [self._fake_conn(500, too_large), self._fake_conn(200, ok)]
+        target_batch = 4391 + model_juggler.EMBED_BATCH_ESCALATION_MARGIN
+
+        with patch("model_juggler.http.client.HTTPConnection", side_effect=conns):
+            handler = self._fake_handler()
+            model_juggler._proxy_embed_with_escalation(
+                handler, state, "embed", runtime, 18181, "POST", "/v1/embeddings", b"{}"
+            )
+
+        # First escalation grows past the offending token count, final revert is None.
+        self.assertEqual(restarts[0], target_batch)
+        self.assertIsNone(restarts[-1])
+        self.assertEqual(events, ["begin", "finish", f"restart:{target_batch}", "begin", "finish", "restart:None"])
+        # The successful (200) body must be relayed to the client.
+        handler.send_response.assert_called_with(200, "OK")
+
+    def test_passes_through_success_without_restart(self) -> None:
+        ok = b'{"data":[{"embedding":[0.1]}]}'
+        runtime = RoleRuntime("embed", 8081, 18181, "127.0.0.1", "127.0.0.1", Path("/tmp/embed.log"))
+        state = Mock()
+        state.roles = {"embed": runtime}
+        state.request_timeout = 5
+        conn = self._fake_conn(200, ok)
+
+        with patch("model_juggler.http.client.HTTPConnection", side_effect=[conn]):
+            handler = self._fake_handler()
+            model_juggler._proxy_embed_with_escalation(
+                handler, state, "embed", runtime, 18181, "POST", "/v1/embeddings", b"{}"
+            )
+
+        state.begin_embed_backend_request.assert_called_once()
+        state.finish_embed_backend_request.assert_called_once()
+        state.restart_embed_with_batch.assert_not_called()
+        handler.send_response.assert_called_with(200, "OK")
+        handler.wfile.write.assert_called_with(ok)
+        self.assertEqual(conn.response.read_sizes, [65536, 65536])
+
+    def test_restart_waits_for_active_embed_request(self) -> None:
+        runtime = RoleRuntime("embed", 8081, 18181, "127.0.0.1", "127.0.0.1", Path("/tmp/embed.log"))
+        state = model_juggler.JugglerState(
+            {"embed": runtime},
+            auto_tune=False,
+            switch_timeout=1.0,
+            startup_timeout=1.0,
+            request_timeout=1.0,
+        )
+        state.stop_process = Mock()  # type: ignore[method-assign]
+        state.ensure_process = Mock()  # type: ignore[method-assign]
+        state.begin_embed_backend_request()
+
+        started = threading.Event()
+        finished = threading.Event()
+
+        def restart() -> None:
+            started.set()
+            state.restart_embed_with_batch(8192)
+            finished.set()
+
+        thread = threading.Thread(target=restart)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(timeout=1.0))
+            self.assertFalse(finished.wait(timeout=0.05))
+            state.finish_embed_backend_request()
+            self.assertTrue(finished.wait(timeout=1.0))
+        finally:
+            if state.active_embed_requests:
+                state.finish_embed_backend_request()
+            thread.join(timeout=1.0)
+
+        state.stop_process.assert_called_once_with("embed")
+        state.ensure_process.assert_called_once_with("embed")
+        self.assertEqual(runtime.batch_size_override, 8192)
 
 
 if __name__ == "__main__":

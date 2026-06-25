@@ -46,6 +46,17 @@ from llama_runtime import (
 HEAVY_ROLES = {"chat", "vision"}
 GATEWAY_DEFAULT_BIND = "127.0.0.1"
 GATEWAY_DEFAULT_PORT = 8088
+# Detects llama-server's "input is too large to process. increase the physical
+# batch" error and (when present) the offending token count, e.g.
+#   "input (4391 tokens) is too large to process. increase the physical batch"
+EMBED_BATCH_ERROR_RE = re.compile(r"too large to process", re.IGNORECASE)
+EMBED_BATCH_TOKENS_RE = re.compile(r"input\s*\((\d+)\s*tokens?\)", re.IGNORECASE)
+# Safety headroom multiplier / additive margin when escalating the batch so the
+# offending chunk comfortably fits, plus an absolute ceiling to avoid OOM.
+EMBED_BATCH_ESCALATION_MARGIN = 64
+EMBED_BATCH_MAX = 131072
+# Max number of escalation attempts for a single oversized request.
+EMBED_BATCH_MAX_ATTEMPTS = 4
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -80,9 +91,16 @@ def helper_env(role: str, *, port: Optional[int] = None, host: Optional[str] = N
         raise StartupError(str(exc)) from exc
 
 
-def helper_argv(role: str, *, port: int, host: str, auto_tune: bool) -> List[str]:
+def helper_argv(role: str, *, port: int, host: str, auto_tune: bool, batch_size_override: Optional[int] = None) -> List[str]:
     try:
-        return build_role_argv(role, panel_dir=REPO_DIR, port_override=port, host_override=host, auto_tune=auto_tune)
+        return build_role_argv(
+            role,
+            panel_dir=REPO_DIR,
+            port_override=port,
+            host_override=host,
+            auto_tune=auto_tune,
+            batch_size_override=batch_size_override,
+        )
     except PanelError as exc:
         raise StartupError(str(exc)) from exc
 
@@ -153,6 +171,9 @@ class RoleRuntime:
     process: Optional[subprocess.Popen[bytes]] = None
     model_path: str = ""
     alias: str = ""
+    # Batch size the backend was launched with. None means "configured default".
+    # Used by the embed try-and-error escalation path to track the live value.
+    batch_size_override: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -184,8 +205,11 @@ class JugglerState:
         self.request_timeout = request_timeout
         self.switch_lock = threading.Lock()
         self.request_cv = threading.Condition()
+        self.embed_request_cv = threading.Condition()
         self.active_heavy: Optional[str] = None
         self.active_requests = {"chat": 0, "vision": 0}
+        self.active_embed_requests = 0
+        self.embed_resizing = False
 
     def validate_files(self) -> None:
         for role in ("chat", "embed", "vision"):
@@ -197,6 +221,58 @@ class JugglerState:
             return
         with self.switch_lock:
             self.ensure_process("embed")
+
+    def embed_configured_batch_size(self) -> int:
+        """Configured (default) embed batch size as set in the GUI / env files."""
+        try:
+            config = role_environment_to_config("embed")
+            return int(config["EMBED_BATCH_SIZE"])
+        except (PanelError, KeyError, ValueError):
+            return 0
+
+    def begin_embed_backend_request(self) -> None:
+        with self.embed_request_cv:
+            while self.embed_resizing:
+                self.embed_request_cv.wait(timeout=1.0)
+            self.active_embed_requests += 1
+
+    def finish_embed_backend_request(self) -> None:
+        with self.embed_request_cv:
+            self.active_embed_requests = max(0, self.active_embed_requests - 1)
+            self.embed_request_cv.notify_all()
+
+    def restart_embed_with_batch(self, batch_size_override: Optional[int]) -> int:
+        """Restart the embed backend with a specific batch-size override.
+
+        Passing ``None`` reverts to the configured default batch size. This is
+        used by the try-and-error escalation path so a single oversized chunk
+        can be processed by temporarily growing the physical batch, then
+        shrinking back afterwards. Works for both gateway and role-proxy modes
+        since both share this JugglerState.
+        """
+        runtime = self.roles["embed"]
+        if runtime.external:
+            raise StartupError("cannot resize batch for an externally managed embed backend")
+        deadline = time.monotonic() + self.switch_timeout
+        with self.embed_request_cv:
+            while self.active_embed_requests > 0 or self.embed_resizing:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ModelBusy("embed request still running")
+                self.embed_request_cv.wait(timeout=min(1.0, remaining))
+            self.embed_resizing = True
+        try:
+            with self.switch_lock:
+                if runtime.batch_size_override == batch_size_override and runtime.process and runtime.process.poll() is None:
+                    return runtime.backend_port
+                self.stop_process("embed")
+                runtime.batch_size_override = batch_size_override
+                self.ensure_process("embed")
+        finally:
+            with self.embed_request_cv:
+                self.embed_resizing = False
+                self.embed_request_cv.notify_all()
+        return runtime.backend_port
 
     def prepare_request(self, role: str) -> int:
         runtime = self.roles[role]
@@ -267,7 +343,13 @@ class JugglerState:
                 f"[panel] preparing {role} backend on {runtime.host}:{runtime.backend_port}\n".encode("utf-8"),
                 stream=inline_stream,
             )
-            argv = helper_argv(role, port=runtime.backend_port, host=runtime.host, auto_tune=self.auto_tune)
+            argv = helper_argv(
+                role,
+                port=runtime.backend_port,
+                host=runtime.host,
+                auto_tune=self.auto_tune,
+                batch_size_override=runtime.batch_size_override,
+            )
             launch_argv, removed_flags = prepare_llama_server_argv(argv)
             write_compat_filter_notice(log_fh, removed_flags, stream=inline_stream)
             write_output_chunk(
@@ -360,6 +442,175 @@ def read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
     return handler.rfile.read(length) if length else b""
 
 
+def _forward_headers(handler: BaseHTTPRequestHandler, runtime: "RoleRuntime", backend_port: int) -> Dict[str, str]:
+    headers = {
+        key: value
+        for key, value in handler.headers.items()
+        if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() != "host"
+    }
+    headers["Host"] = f"{runtime.host}:{backend_port}"
+    headers["Connection"] = "close"
+    return headers
+
+
+def _relay_streaming_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPResponse) -> None:
+    handler.send_response(response.status, response.reason)
+    sent_connection = False
+    for key, value in response.getheaders():
+        lower_key = key.lower()
+        if lower_key in HOP_BY_HOP_HEADERS:
+            continue
+        if lower_key == "connection":
+            sent_connection = True
+            continue
+        handler.send_header(key, value)
+    if not sent_connection:
+        handler.send_header("Connection", "close")
+    handler.end_headers()
+
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        handler.wfile.write(chunk)
+        handler.wfile.flush()
+
+
+def _relay_buffered_response(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    reason: str,
+    raw_headers: List[tuple],
+    body: bytes,
+) -> None:
+    handler.send_response(status, reason)
+    sent_connection = False
+    sent_length = False
+    for key, value in raw_headers:
+        lower_key = key.lower()
+        if lower_key in HOP_BY_HOP_HEADERS:
+            continue
+        if lower_key == "connection":
+            sent_connection = True
+            continue
+        if lower_key == "content-length":
+            # We buffered the body, so emit our own accurate length.
+            continue
+        handler.send_header(key, value)
+    handler.send_header("Content-Length", str(len(body)))
+    sent_length = True
+    if not sent_connection:
+        handler.send_header("Connection", "close")
+    handler.end_headers()
+    if body:
+        handler.wfile.write(body)
+        handler.wfile.flush()
+    _ = sent_length
+
+
+def _is_embed_batch_error(status: int, body: bytes) -> bool:
+    if status < 400:
+        return False
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    return bool(EMBED_BATCH_ERROR_RE.search(text))
+
+
+def _required_tokens_from_error(body: bytes) -> Optional[int]:
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    match = EMBED_BATCH_TOKENS_RE.search(text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _proxy_embed_with_escalation(
+    handler: BaseHTTPRequestHandler,
+    state: JugglerState,
+    role: str,
+    runtime: "RoleRuntime",
+    backend_port: int,
+    command: str,
+    path: str,
+    body: bytes,
+) -> None:
+    """Embed proxy path with try-and-error physical-batch escalation.
+
+    Successful responses stay streaming. Error responses are buffered so the
+    proxy can detect llama-server's "input is too large to process. increase the
+    physical batch" error. When detected, the embed backend is restarted with a
+    larger batch size to fit the oversized chunk, the request is retried, and
+    afterwards the backend is reverted to its configured batch size. Applies in
+    both gateway and role-proxy modes since both share this JugglerState.
+    """
+    escalated = False
+    attempts = 0
+    current_port = backend_port
+
+    try:
+        while True:
+            headers = _forward_headers(handler, runtime, current_port)
+            conn = http.client.HTTPConnection(runtime.host, current_port, timeout=state.request_timeout)
+            state.begin_embed_backend_request()
+            try:
+                conn.request(command, path, body=body, headers=headers)
+                response = conn.getresponse()
+                status = response.status
+                reason = response.reason
+                raw_headers = response.getheaders()
+                if status < 400:
+                    _relay_streaming_response(handler, response)
+                    return
+                resp_body = response.read()
+            finally:
+                conn.close()
+                state.finish_embed_backend_request()
+
+            if not _is_embed_batch_error(status, resp_body) or attempts >= EMBED_BATCH_MAX_ATTEMPTS:
+                _relay_buffered_response(handler, status, reason, raw_headers, resp_body)
+                return
+
+            attempts += 1
+            required = _required_tokens_from_error(resp_body)
+            current_batch = runtime.batch_size_override or state.embed_configured_batch_size()
+            if required is not None:
+                target = required + EMBED_BATCH_ESCALATION_MARGIN
+            else:
+                # No token count reported: double the current batch as a fallback.
+                target = max(current_batch, 1) * 2
+            # Never shrink, always grow past whatever we are currently at.
+            target = max(target, current_batch + EMBED_BATCH_ESCALATION_MARGIN)
+            if target > EMBED_BATCH_MAX:
+                target = EMBED_BATCH_MAX
+            if target <= current_batch:
+                # Cannot grow any further; surface the original error.
+                _relay_buffered_response(handler, status, reason, raw_headers, resp_body)
+                return
+
+            sys.stderr.write(
+                f"[embed] input too large for batch {current_batch}; "
+                f"escalating physical batch to {target} and retrying\n"
+            )
+            current_port = state.restart_embed_with_batch(target)
+            escalated = True
+    finally:
+        if escalated:
+            # Revert to the configured batch size so the oversized chunk does
+            # not permanently inflate memory usage for subsequent requests.
+            try:
+                state.restart_embed_with_batch(None)
+            except Exception as exc:
+                sys.stderr.write(f"[embed] failed to revert batch size: {exc}\n")
+
+
 def proxy_request(
     handler: BaseHTTPRequestHandler,
     state: JugglerState,
@@ -377,38 +628,24 @@ def proxy_request(
         if body is None:
             body = read_request_body(handler)
 
-        headers = {
-            key: value
-            for key, value in handler.headers.items()
-            if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() != "host"
-        }
-        headers["Host"] = f"{runtime.host}:{backend_port}"
-        headers["Connection"] = "close"
+        if role == "embed" and not runtime.external and handler.command == "POST":
+            _proxy_embed_with_escalation(
+                handler,
+                state,
+                role,
+                runtime,
+                backend_port,
+                handler.command,
+                handler.path,
+                body,
+            )
+            return
 
+        headers = _forward_headers(handler, runtime, backend_port)
         conn = http.client.HTTPConnection(runtime.host, backend_port, timeout=state.request_timeout)
         conn.request(handler.command, handler.path, body=body, headers=headers)
         response = conn.getresponse()
-
-        handler.send_response(response.status, response.reason)
-        sent_connection = False
-        for key, value in response.getheaders():
-            lower_key = key.lower()
-            if lower_key in HOP_BY_HOP_HEADERS:
-                continue
-            if lower_key == "connection":
-                sent_connection = True
-                continue
-            handler.send_header(key, value)
-        if not sent_connection:
-            handler.send_header("Connection", "close")
-        handler.end_headers()
-
-        while True:
-            chunk = response.read(65536)
-            if not chunk:
-                break
-            handler.wfile.write(chunk)
-            handler.wfile.flush()
+        _relay_streaming_response(handler, response)
         conn.close()
     except ModelBusy as exc:
         write_error(handler, 503, f"model switch busy: {exc}")

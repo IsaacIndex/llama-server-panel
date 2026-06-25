@@ -573,6 +573,7 @@ def build_role_argv(
     port_override: Optional[int] = None,
     host_override: Optional[str] = None,
     auto_tune: bool = False,
+    batch_size_override: Optional[int] = None,
 ) -> list[str]:
     panel_dir = (panel_dir or repo_dir()).resolve()
     if auto_tune:
@@ -584,6 +585,7 @@ def build_role_argv(
         role,
         host=host_override or config["LLAMA_HOST"],
         port=str(port_override or config[f"{prefix}_PORT"]),
+        batch_size_override=batch_size_override,
     )
 
 
@@ -593,6 +595,7 @@ def build_role_argv_for_config(
     *,
     host: str,
     port: str,
+    batch_size_override: Optional[int] = None,
 ) -> list[str]:
     binary = ensure_llama_server_binary(config)
     if role == "chat":
@@ -642,6 +645,22 @@ def build_role_argv_for_config(
         ]
 
     if role == "embed":
+        batch_value = config["EMBED_BATCH_SIZE"]
+        ubatch_value = config["EMBED_UBATCH_SIZE"]
+        ctx_value = config["EMBED_CTX_SIZE"]
+        if batch_size_override is not None:
+            # Escalated batch size (try-and-error path for oversized chunks).
+            # Bump both the logical and physical batch so a single large chunk
+            # fits, and grow the context window to at least the batch size since
+            # the chunk must also fit within n_ctx.
+            override_text = str(batch_size_override)
+            batch_value = override_text
+            ubatch_value = override_text
+            try:
+                if int(ctx_value) < batch_size_override:
+                    ctx_value = override_text
+            except (TypeError, ValueError):
+                ctx_value = override_text
         return [
             binary,
             "--model",
@@ -651,17 +670,13 @@ def build_role_argv_for_config(
             "--port",
             port,
             "--ctx-size",
-            config["EMBED_CTX_SIZE"],
+            ctx_value,
             "--batch-size",
-            config["EMBED_BATCH_SIZE"],
+            batch_value,
             "--ubatch-size",
-            config["EMBED_UBATCH_SIZE"],
+            ubatch_value,
             "--threads",
             config["EMBED_THREADS"],
-            "--batch-size",
-            config["EMBED_BATCH_SIZE"],
-            "--ubatch-size",
-            config["EMBED_UBATCH_SIZE"],
             "--embedding",
             "--pooling",
             config["EMBED_POOLING"],

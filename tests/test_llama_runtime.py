@@ -245,5 +245,55 @@ class LlamaRuntimePublicDefaultsTest(unittest.TestCase):
                 ensure_llama_server_binary({"LLAMA_SERVER_BIN": str(launcher)})
 
 
+class EmbedArgvTest(unittest.TestCase):
+    def _config(self) -> dict[str, str]:
+        config = default_config()
+        config["LLAMA_SERVER_BIN"] = "llama-server"
+        return config
+
+    def _build(self, config, *, batch_size_override=None):
+        with patch("scripts.llama_runtime.ensure_llama_server_binary", return_value="llama-server"):
+            return llama_runtime.build_role_argv_for_config(
+                config,
+                "embed",
+                host="127.0.0.1",
+                port="8081",
+                batch_size_override=batch_size_override,
+            )
+
+    def test_embed_argv_has_no_duplicate_batch_flags(self) -> None:
+        argv = self._build(self._config())
+        self.assertEqual(argv.count("--batch-size"), 1)
+        self.assertEqual(argv.count("--ubatch-size"), 1)
+
+    def test_embed_argv_uses_configured_batch_size(self) -> None:
+        config = self._config()
+        config["EMBED_BATCH_SIZE"] = "2048"
+        config["EMBED_UBATCH_SIZE"] = "1024"
+        argv = self._build(config)
+        self.assertEqual(argv[argv.index("--batch-size") + 1], "2048")
+        self.assertEqual(argv[argv.index("--ubatch-size") + 1], "1024")
+
+    def test_embed_argv_override_grows_both_batches(self) -> None:
+        config = self._config()
+        config["EMBED_BATCH_SIZE"] = "2048"
+        config["EMBED_UBATCH_SIZE"] = "1024"
+        argv = self._build(config, batch_size_override=8192)
+        self.assertEqual(argv[argv.index("--batch-size") + 1], "8192")
+        self.assertEqual(argv[argv.index("--ubatch-size") + 1], "8192")
+
+    def test_embed_argv_override_grows_ctx_when_smaller(self) -> None:
+        config = self._config()
+        config["EMBED_CTX_SIZE"] = "4096"
+        argv = self._build(config, batch_size_override=8192)
+        self.assertEqual(argv[argv.index("--ctx-size") + 1], "8192")
+
+    def test_embed_argv_override_keeps_larger_ctx(self) -> None:
+        config = self._config()
+        config["EMBED_CTX_SIZE"] = "16384"
+        argv = self._build(config, batch_size_override=8192)
+        self.assertEqual(argv[argv.index("--ctx-size") + 1], "16384")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -135,6 +135,9 @@ CAPTION_FONT = ("IBM Plex Sans", 10, "normal")
 MONO_FONT = ("Menlo", 9, "normal")
 HEADER_COPY_WRAP = 720
 FIELD_LABEL_WIDTH = 12
+BASE_WINDOW_WIDTH = 1240
+BASE_WINDOW_HEIGHT = 820
+MIN_UI_SCALE = 0.88
 
 
 @dataclass
@@ -511,79 +514,100 @@ def process_running(proc: Optional[subprocess.Popen[bytes]]) -> bool:
     return proc is not None and proc.poll() is None
 
 
-def configure_carbon_style(root, style) -> None:
+def scaled_font(font: tuple[str, int, str], scale: float) -> tuple[str, int, str]:
+    family, size, weight = font
+    return (family, max(8, round(size * scale)), weight)
+
+
+def scaled_padding(padding: tuple[int, int], scale: float) -> tuple[int, int]:
+    return tuple(max(2, round(value * scale)) for value in padding)
+
+
+def configure_carbon_style(root, style, *, scale: float = 1.0) -> None:
+    body_font = scaled_font(BODY_FONT, scale)
+    body_emphasis_font = scaled_font(BODY_EMPHASIS_FONT, scale)
+    display_font = scaled_font(DISPLAY_FONT, scale)
+    headline_font = scaled_font(HEADLINE_FONT, scale)
+    title_font = scaled_font(TITLE_FONT, scale)
+    caption_font = scaled_font(CAPTION_FONT, scale)
+    mono_font = scaled_font(MONO_FONT, scale)
+    button_padding = scaled_padding((8, 4), scale)
+    primary_button_padding = scaled_padding((10, 5), scale)
+    entry_padding = scaled_padding((6, 3), scale)
+    tab_padding = scaled_padding((10, 5), scale)
+
     root.configure(bg=CANVAS)
-    root.option_add("*Font", BODY_FONT)
+    root.option_add("*Font", body_font)
     root.option_add("*selectBackground", IBM_BLUE)
     root.option_add("*selectForeground", INVERSE_INK)
 
-    style.configure(".", background=CANVAS, foreground=INK, font=BODY_FONT, borderwidth=0, relief="flat")
+    style.configure(".", background=CANVAS, foreground=INK, font=body_font, borderwidth=0, relief="flat")
     style.configure("TFrame", background=CANVAS)
     style.configure("Canvas.TFrame", background=CANVAS)
     style.configure("Surface.TFrame", background=SURFACE_1)
     style.configure("Header.TFrame", background=CANVAS)
     style.configure("Toolbar.TFrame", background=CANVAS)
 
-    style.configure("TLabel", background=CANVAS, foreground=INK, font=BODY_FONT)
-    style.configure("Muted.TLabel", background=CANVAS, foreground=INK_MUTED, font=BODY_FONT)
-    style.configure("Field.TLabel", background=SURFACE_1, foreground=INK_MUTED, font=BODY_FONT)
-    style.configure("Eyebrow.TLabel", background=CANVAS, foreground=INK_MUTED, font=BODY_EMPHASIS_FONT)
-    style.configure("Display.TLabel", background=CANVAS, foreground=INK, font=DISPLAY_FONT)
-    style.configure("Headline.TLabel", background=CANVAS, foreground=INK, font=HEADLINE_FONT)
-    style.configure("Section.TLabel", background=SURFACE_1, foreground=INK, font=TITLE_FONT)
-    style.configure("Status.TLabel", background=CANVAS, foreground=IBM_BLUE, font=BODY_EMPHASIS_FONT)
-    style.configure("Inverse.TLabel", background=INVERSE_CANVAS, foreground=INVERSE_INK, font=BODY_FONT)
-    style.configure("InverseMuted.TLabel", background=INVERSE_CANVAS, foreground="#c6c6c6", font=CAPTION_FONT)
+    style.configure("TLabel", background=CANVAS, foreground=INK, font=body_font)
+    style.configure("Muted.TLabel", background=CANVAS, foreground=INK_MUTED, font=body_font)
+    style.configure("Field.TLabel", background=SURFACE_1, foreground=INK_MUTED, font=body_font)
+    style.configure("Eyebrow.TLabel", background=CANVAS, foreground=INK_MUTED, font=body_emphasis_font)
+    style.configure("Display.TLabel", background=CANVAS, foreground=INK, font=display_font)
+    style.configure("Headline.TLabel", background=CANVAS, foreground=INK, font=headline_font)
+    style.configure("Section.TLabel", background=SURFACE_1, foreground=INK, font=title_font)
+    style.configure("Status.TLabel", background=CANVAS, foreground=IBM_BLUE, font=body_emphasis_font)
+    style.configure("Inverse.TLabel", background=INVERSE_CANVAS, foreground=INVERSE_INK, font=body_font)
+    style.configure("InverseMuted.TLabel", background=INVERSE_CANVAS, foreground="#c6c6c6", font=caption_font)
 
-    style.configure("TLabelframe", background=SURFACE_1, bordercolor=HAIRLINE, borderwidth=1, relief="solid", padding=10)
-    style.configure("TLabelframe.Label", background=SURFACE_1, foreground=INK, font=BODY_EMPHASIS_FONT)
-    style.configure("Panel.TLabelframe", background=SURFACE_1, bordercolor=HAIRLINE, borderwidth=1, relief="solid", padding=10)
-    style.configure("Panel.TLabelframe.Label", background=SURFACE_1, foreground=INK, font=BODY_EMPHASIS_FONT)
+    style.configure("TLabelframe", background=SURFACE_1, bordercolor=HAIRLINE, borderwidth=1, relief="solid", padding=max(6, round(8 * scale)))
+    style.configure("TLabelframe.Label", background=SURFACE_1, foreground=INK, font=body_emphasis_font)
+    style.configure("Panel.TLabelframe", background=SURFACE_1, bordercolor=HAIRLINE, borderwidth=1, relief="solid", padding=max(6, round(8 * scale)))
+    style.configure("Panel.TLabelframe.Label", background=SURFACE_1, foreground=INK, font=body_emphasis_font)
 
-    style.configure("TButton", background=SURFACE_1, foreground=INK, bordercolor=HAIRLINE, focusthickness=1, focuscolor=IBM_BLUE, padding=(10, 5), relief="flat")
+    style.configure("TButton", background=SURFACE_1, foreground=INK, bordercolor=HAIRLINE, focusthickness=1, focuscolor=IBM_BLUE, padding=button_padding, relief="flat")
     style.map(
         "TButton",
         background=[("pressed", SURFACE_3), ("active", SURFACE_2), ("disabled", CANVAS)],
         foreground=[("disabled", INK_SUBTLE)],
         bordercolor=[("focus", IBM_BLUE)],
     )
-    style.configure("Secondary.TButton", background=CANVAS, foreground=INK, bordercolor=HAIRLINE, padding=(10, 5), relief="flat")
+    style.configure("Secondary.TButton", background=CANVAS, foreground=INK, bordercolor=HAIRLINE, padding=button_padding, relief="flat")
     style.map(
         "Secondary.TButton",
         background=[("pressed", SURFACE_2), ("active", SURFACE_1), ("disabled", CANVAS)],
         foreground=[("disabled", INK_SUBTLE)],
         bordercolor=[("focus", IBM_BLUE)],
     )
-    style.configure("Segment.TButton", background=CANVAS, foreground=INK, bordercolor=HAIRLINE, padding=(12, 6), relief="flat")
+    style.configure("Segment.TButton", background=CANVAS, foreground=INK, bordercolor=HAIRLINE, padding=primary_button_padding, relief="flat")
     style.map(
         "Segment.TButton",
         background=[("pressed", SURFACE_2), ("active", SURFACE_1), ("disabled", CANVAS)],
         foreground=[("disabled", INK_SUBTLE)],
         bordercolor=[("focus", IBM_BLUE)],
     )
-    style.configure("SelectedSegment.TButton", background=IBM_BLUE, foreground=INVERSE_INK, bordercolor=IBM_BLUE, padding=(12, 6), relief="flat")
+    style.configure("SelectedSegment.TButton", background=IBM_BLUE, foreground=INVERSE_INK, bordercolor=IBM_BLUE, padding=primary_button_padding, relief="flat")
     style.map(
         "SelectedSegment.TButton",
         background=[("pressed", IBM_BLUE_PRESSED), ("active", IBM_BLUE_HOVER), ("disabled", IBM_BLUE)],
         foreground=[("disabled", INVERSE_INK)],
     )
-    style.configure("Accent.TButton", background=IBM_BLUE, foreground=INVERSE_INK, bordercolor=IBM_BLUE, padding=(12, 6), relief="flat")
+    style.configure("Accent.TButton", background=IBM_BLUE, foreground=INVERSE_INK, bordercolor=IBM_BLUE, padding=primary_button_padding, relief="flat")
     style.map(
         "Accent.TButton",
         background=[("pressed", IBM_BLUE_PRESSED), ("active", IBM_BLUE_HOVER), ("disabled", SURFACE_2)],
         foreground=[("disabled", INK_SUBTLE)],
     )
-    style.configure("Danger.TButton", background=ERROR, foreground=INVERSE_INK, bordercolor=ERROR, padding=(10, 5), relief="flat")
+    style.configure("Danger.TButton", background=ERROR, foreground=INVERSE_INK, bordercolor=ERROR, padding=button_padding, relief="flat")
     style.map("Danger.TButton", background=[("pressed", "#750e13"), ("active", "#ba1b23")])
 
-    style.configure("TCheckbutton", background=CANVAS, foreground=INK, font=BODY_FONT, padding=(2, 2))
-    style.configure("TEntry", fieldbackground=SURFACE_1, foreground=INK, bordercolor=HAIRLINE, lightcolor=HAIRLINE, darkcolor=HAIRLINE, padding=(8, 4), relief="flat")
+    style.configure("TCheckbutton", background=CANVAS, foreground=INK, font=body_font, padding=(2, 2))
+    style.configure("TEntry", fieldbackground=SURFACE_1, foreground=INK, bordercolor=HAIRLINE, lightcolor=HAIRLINE, darkcolor=HAIRLINE, padding=entry_padding, relief="flat")
     style.map("TEntry", bordercolor=[("focus", IBM_BLUE)], fieldbackground=[("disabled", SURFACE_2)])
-    style.configure("TCombobox", fieldbackground=SURFACE_1, background=SURFACE_1, foreground=INK, bordercolor=HAIRLINE, arrowcolor=IBM_BLUE, padding=(6, 4), relief="flat")
+    style.configure("TCombobox", fieldbackground=SURFACE_1, background=SURFACE_1, foreground=INK, bordercolor=HAIRLINE, arrowcolor=IBM_BLUE, padding=entry_padding, relief="flat")
     style.map("TCombobox", bordercolor=[("focus", IBM_BLUE)], fieldbackground=[("readonly", SURFACE_1)])
     style.configure("TNotebook", background=CANVAS, borderwidth=0, tabmargins=(0, 0, 0, 0))
-    style.configure("TNotebook.Tab", background=SURFACE_1, foreground=INK_MUTED, padding=(14, 7), borderwidth=0, font=BODY_FONT)
-    style.map("TNotebook.Tab", background=[("selected", CANVAS), ("active", SURFACE_2)], foreground=[("selected", INK), ("active", INK)])
+    style.configure("TNotebook.Tab", background=SURFACE_1, foreground=INK_MUTED, padding=tab_padding, borderwidth=0, font=body_font)
+    style.map("TNotebook.Tab", background=[("selected", SURFACE_1), ("active", SURFACE_2)], foreground=[("selected", INK), ("active", INK)])
     style.configure("TSeparator", background=HAIRLINE)
     style.configure("Vertical.TScrollbar", background=SURFACE_1, troughcolor=CANVAS, bordercolor=CANVAS, arrowcolor=IBM_BLUE)
     style.configure("Horizontal.TScrollbar", background=SURFACE_1, troughcolor=CANVAS, bordercolor=CANVAS, arrowcolor=IBM_BLUE)
@@ -609,6 +633,9 @@ def run_gui() -> int:
             self.juggler_handle: Optional[JugglerHandle] = None
             self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
             self.update_check_running = False
+            self.style: Optional[ttk.Style] = None
+            self.ui_scale = 1.0
+            self._resize_after_id: Optional[str] = None
 
             self.root.title("Llama Server Panel")
             self.root.geometry("1240x820")
@@ -617,6 +644,7 @@ def run_gui() -> int:
             style = ttk.Style()
             if "clam" in style.theme_names():
                 style.theme_use("clam")
+            self.style = style
             configure_carbon_style(self.root, style)
 
             self.auto_tune = tk.BooleanVar(value=True)
@@ -629,6 +657,8 @@ def run_gui() -> int:
             self.juggler_status = tk.StringVar(value="Stopped")
 
             self._build_layout(ttk, tk, filedialog, messagebox)
+            self.root.bind("<Configure>", self._schedule_compact_resize)
+            self.root.after_idle(self._apply_compact_resize)
             self.reload_config()
             self.refresh_model_list()
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -641,10 +671,10 @@ def run_gui() -> int:
             main.pack(fill=tk.BOTH, expand=True)
             main.columnconfigure(0, weight=1, uniform="main")
             main.columnconfigure(1, weight=2, uniform="main")
-            main.rowconfigure(2, weight=4)
-            main.rowconfigure(3, weight=1)
+            main.rowconfigure(2, weight=1)
+            main.rowconfigure(3, weight=0)
 
-            header = ttk.Frame(main, padding=(20, 14, 20, 12), style="Header.TFrame")
+            header = ttk.Frame(main, padding=(20, 10, 20, 8), style="Header.TFrame")
             header.grid(row=0, column=0, columnspan=2, sticky="ew")
             header.columnconfigure(0, weight=1)
             ttk.Label(header, text="LOCAL MODEL OPERATIONS", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
@@ -663,15 +693,15 @@ def run_gui() -> int:
             ttk.Button(actions, text="Save Config", command=self.save_config, style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
             ttk.Button(actions, text="Reload", command=self.reload_config, style="Secondary.TButton").grid(row=0, column=2)
 
-            general = ttk.LabelFrame(main, text="Paths", padding=10, style="Panel.TLabelframe")
-            general.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 10))
+            general = ttk.LabelFrame(main, text="Paths", padding=8, style="Panel.TLabelframe")
+            general.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 8))
             general.columnconfigure(1, weight=1)
             self._entry_row(general, ttk, "llama-server", "LLAMA_SERVER_BIN", 0, browse_file=True)
             self._entry_row(general, ttk, "Model dir", "MODEL_DIR", 1, browse_dir=True)
             self._entry_row(general, ttk, "Log dir", "LOG_DIR", 2, browse_dir=True)
 
-            library = ttk.LabelFrame(main, text="Model Library", padding=10, style="Panel.TLabelframe")
-            library.grid(row=2, column=0, sticky="nsew", padx=(20, 6), pady=(0, 10))
+            library = ttk.LabelFrame(main, text="Model Library", padding=8, style="Panel.TLabelframe")
+            library.grid(row=2, column=0, sticky="nsew", padx=(20, 6), pady=(0, 8))
             library.columnconfigure(0, weight=1)
             library.rowconfigure(0, weight=1)
             self.model_list = tk.Listbox(
@@ -709,19 +739,19 @@ def run_gui() -> int:
             ttk.Button(library_actions, text="Assign", command=self.assign_selected_model, style="Secondary.TButton").grid(row=1, column=1, sticky="e", pady=(6, 0))
 
             right = ttk.Frame(main, style="Canvas.TFrame")
-            right.grid(row=2, column=1, sticky="nsew", padx=(6, 20), pady=(0, 10))
+            right.grid(row=2, column=1, sticky="nsew", padx=(6, 20), pady=(0, 8))
             right.columnconfigure(0, weight=1)
             right.rowconfigure(0, weight=1)
 
             main_tabs = ttk.Notebook(right)
             main_tabs.grid(row=0, column=0, sticky="nsew")
 
-            role_tab, role_frame = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(10, 10, 10, 8))
+            role_tab, role_frame = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(6, 6, 6, 4))
             role_frame.columnconfigure(0, weight=1)
             main_tabs.add(role_tab, text="Roles")
 
             role_selector = ttk.Frame(role_frame, style="Canvas.TFrame")
-            role_selector.grid(row=0, column=0, sticky="w", pady=(0, 8))
+            role_selector.grid(row=0, column=0, sticky="w", pady=(0, 6))
             self.active_role = tk.StringVar(value="chat")
             self.role_selector_buttons: Dict[str, ttk.Button] = {}
             self.role_pages: Dict[str, ttk.Frame] = {}
@@ -735,15 +765,15 @@ def run_gui() -> int:
                 button.grid(row=0, column=len(self.role_selector_buttons), sticky="w", padx=(0, 6))
                 self.role_selector_buttons[role] = button
 
-                role_page = ttk.LabelFrame(role_frame, text=f"{ROLE_LABELS[role]} Role", padding=10, style="Panel.TLabelframe")
+                role_page = ttk.LabelFrame(role_frame, text=f"{ROLE_LABELS[role]} Role", padding=8, style="Panel.TLabelframe")
                 role_page.grid(row=1, column=0, sticky="nsew")
                 role_page.columnconfigure(1, weight=1)
                 self._role_block(role_page, ttk, role, 0)
                 self.role_pages[role] = role_page
             self.set_active_role("chat")
 
-            juggler = ttk.LabelFrame(role_frame, text="Juggler", padding=10, style="Panel.TLabelframe")
-            juggler.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+            juggler = ttk.LabelFrame(role_frame, text="Juggler", padding=8, style="Panel.TLabelframe")
+            juggler.grid(row=2, column=0, sticky="ew", pady=(6, 0))
             juggler.columnconfigure(1, weight=1)
             juggler.columnconfigure(3, weight=1)
             ttk.Label(juggler, text="Mode", style="Field.TLabel").grid(row=0, column=0, sticky="w")
@@ -758,31 +788,31 @@ def run_gui() -> int:
             ttk.Entry(juggler, textvariable=self.gateway_bind, width=14).grid(row=0, column=3, sticky="ew", padx=(8, 16))
             ttk.Label(juggler, text="Port", style="Field.TLabel").grid(row=0, column=4, sticky="w")
             ttk.Entry(juggler, textvariable=self.gateway_port, width=8).grid(row=0, column=5, sticky="w", padx=(8, 16))
-            ttk.Label(juggler, text="Role proxy bind", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
-            ttk.Entry(juggler, textvariable=self._var("JUGGLE_ROLE_PROXY_BIND_HOST"), width=14).grid(row=1, column=1, sticky="ew", padx=(8, 16), pady=(8, 0))
-            ttk.Label(juggler, textvariable=self.juggler_status, style="Status.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-            ttk.Checkbutton(juggler, text="Auto-tune", variable=self.auto_tune).grid(row=2, column=2, sticky="w", pady=(8, 0))
+            ttk.Label(juggler, text="Role proxy bind", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 0))
+            ttk.Entry(juggler, textvariable=self._var("JUGGLE_ROLE_PROXY_BIND_HOST"), width=14).grid(row=1, column=1, sticky="ew", padx=(8, 16), pady=(5, 0))
+            ttk.Label(juggler, textvariable=self.juggler_status, style="Status.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+            ttk.Checkbutton(juggler, text="Auto-tune", variable=self.auto_tune).grid(row=2, column=2, sticky="w", pady=(5, 0))
             juggler_actions = ttk.Frame(juggler, style="Surface.TFrame")
-            juggler_actions.grid(row=2, column=3, columnspan=3, sticky="e", pady=(8, 0))
+            juggler_actions.grid(row=2, column=3, columnspan=3, sticky="e", pady=(5, 0))
             ttk.Button(juggler_actions, text="Start", command=self.start_juggler, style="Accent.TButton").grid(row=0, column=0, padx=(0, 6))
             ttk.Button(juggler_actions, text="Stop", command=self.stop_juggler, style="Secondary.TButton").grid(row=0, column=1, padx=(0, 6))
             ttk.Button(juggler_actions, text="Check", command=self.check_juggler, style="Secondary.TButton").grid(row=0, column=2)
 
-            tester_tab, tester = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(10, 10, 10, 8))
+            tester_tab, tester = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(6, 6, 6, 4))
             main_tabs.add(tester_tab, text="API Tester")
             self._api_tester_block(tester, ttk, tk)
 
-            logs_tab, logs = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(10, 10, 10, 8))
+            logs_tab, logs = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(6, 6, 6, 4))
             main_tabs.add(logs_tab, text="Logs")
             self._build_log_panel(logs, ttk, tk)
 
-            output_frame = ttk.LabelFrame(main, text="Output", padding=10, style="Panel.TLabelframe")
-            output_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0, 16))
+            output_frame = ttk.LabelFrame(main, text="Output", padding=8, style="Panel.TLabelframe")
+            output_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0, 12))
             output_frame.columnconfigure(0, weight=1)
             output_frame.rowconfigure(0, weight=1)
             self.output = tk.Text(
                 output_frame,
-                height=5,
+                height=4,
                 wrap="none",
                 bg=INVERSE_CANVAS,
                 fg=INVERSE_INK,
@@ -791,8 +821,8 @@ def run_gui() -> int:
                 selectforeground=INVERSE_INK,
                 borderwidth=0,
                 highlightthickness=0,
-                padx=12,
-                pady=8,
+                padx=10,
+                pady=6,
                 font=MONO_FONT,
             )
             self.output.grid(row=0, column=0, sticky="nsew")
@@ -811,13 +841,25 @@ def run_gui() -> int:
             canvas.grid(row=0, column=0, sticky="nsew")
             y_scroll = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
             y_scroll.grid(row=0, column=1, sticky="ns")
+            y_scroll.grid_remove()
             canvas.configure(yscrollcommand=y_scroll.set)
 
             inner = ttk.Frame(canvas, padding=padding, style="Canvas.TFrame")
             window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
 
             def refresh_scroll_region(_event=None) -> None:
-                canvas.configure(scrollregion=canvas.bbox("all"))
+                bounds = canvas.bbox("all")
+                canvas.configure(scrollregion=bounds)
+                if not bounds:
+                    y_scroll.grid_remove()
+                    return
+                content_height = bounds[3] - bounds[1]
+                viewport_height = canvas.winfo_height()
+                if viewport_height > 1 and content_height <= viewport_height + 2:
+                    y_scroll.grid_remove()
+                    canvas.yview_moveto(0)
+                else:
+                    y_scroll.grid()
 
             def fit_inner_width(event) -> None:
                 canvas.itemconfigure(window_id, width=event.width)
@@ -847,6 +889,34 @@ def run_gui() -> int:
             outer.bind("<Leave>", unbind_mousewheel)
             return outer, inner
 
+        def _schedule_compact_resize(self, event=None) -> None:
+            if event is not None and event.widget is not self.root:
+                return
+            if self._resize_after_id is not None:
+                self.root.after_cancel(self._resize_after_id)
+            self._resize_after_id = self.root.after(80, self._apply_compact_resize)
+
+        def _apply_compact_resize(self) -> None:
+            self._resize_after_id = None
+            width = self.root.winfo_width() or self.root.winfo_reqwidth() or 1
+            height = self.root.winfo_height() or self.root.winfo_reqheight() or 1
+            scale = min(1.0, max(MIN_UI_SCALE, min(width / BASE_WINDOW_WIDTH, height / BASE_WINDOW_HEIGHT)))
+            scale = round(scale, 2)
+            if abs(scale - self.ui_scale) < 0.02:
+                return
+            self.ui_scale = scale
+            if self.style is not None:
+                configure_carbon_style(self.root, self.style, scale=scale)
+            body_font = scaled_font(BODY_FONT, scale)
+            mono_font = scaled_font(MONO_FONT, scale)
+            for widget in (getattr(self, "model_list", None), getattr(self, "chat_test_input", None), getattr(self, "embedding_test_input", None)):
+                if widget is not None:
+                    widget.configure(font=body_font)
+            if hasattr(self, "output"):
+                self.output.configure(font=mono_font)
+            for text in self.log_texts.values():
+                text.configure(font=mono_font)
+
         def _var(self, key: str) -> "tk.StringVar":
             if key not in self.values:
                 import tkinter as tk
@@ -855,18 +925,18 @@ def run_gui() -> int:
             return self.values[key]
 
         def _entry_row(self, parent, ttk, label: str, key: str, row: int, *, browse_file: bool = False, browse_dir: bool = False) -> None:
-            ttk.Label(parent, text=label, style="Field.TLabel", width=FIELD_LABEL_WIDTH).grid(row=row, column=0, sticky="w", pady=3)
-            ttk.Entry(parent, textvariable=self._var(key)).grid(row=row, column=1, sticky="ew", padx=(8, 6), pady=3)
+            ttk.Label(parent, text=label, style="Field.TLabel", width=FIELD_LABEL_WIDTH).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(parent, textvariable=self._var(key)).grid(row=row, column=1, sticky="ew", padx=(6, 6), pady=2)
             if browse_file:
-                ttk.Button(parent, text="Browse", command=lambda: self.browse_file(key), style="Secondary.TButton").grid(row=row, column=2, sticky="e", pady=3)
+                ttk.Button(parent, text="Browse", command=lambda: self.browse_file(key), style="Secondary.TButton").grid(row=row, column=2, sticky="e", pady=2)
             elif browse_dir:
-                ttk.Button(parent, text="Browse", command=lambda: self.browse_dir(key), style="Secondary.TButton").grid(row=row, column=2, sticky="e", pady=3)
+                ttk.Button(parent, text="Browse", command=lambda: self.browse_dir(key), style="Secondary.TButton").grid(row=row, column=2, sticky="e", pady=2)
 
         def _role_block(self, parent, ttk, role: str, start_row: int) -> int:
             prefix = ROLE_PREFIX[role]
             parent.columnconfigure(0, minsize=120)
             parent.columnconfigure(1, weight=1)
-            ttk.Separator(parent).grid(row=start_row, column=0, columnspan=5, sticky="ew", pady=(4, 8))
+            ttk.Separator(parent).grid(row=start_row, column=0, columnspan=5, sticky="ew", pady=(2, 5))
             ttk.Label(parent, text=ROLE_LABELS[role], style="Headline.TLabel").grid(row=start_row + 1, column=0, sticky="w")
             ttk.Label(parent, textvariable=self.status_vars[role], style="Status.TLabel").grid(row=start_row + 1, column=1, sticky="w")
             start_button = ttk.Button(parent, text="Start", command=lambda r=role: self.start_role(r), style="Accent.TButton")
@@ -887,14 +957,25 @@ def run_gui() -> int:
             self._entry_row(parent, ttk, "Proxy bind", f"JUGGLE_{prefix}_PROXY_BIND_HOST", row)
             row += 1
 
-            compact = ttk.Frame(parent, padding=(0, 4, 0, 0), style="Canvas.TFrame")
-            compact.grid(row=row, column=0, columnspan=5, sticky="ew", pady=(0, 4))
+            compact = ttk.Frame(parent, padding=(0, 2, 0, 0), style="Canvas.TFrame")
+            compact.grid(row=row, column=0, columnspan=5, sticky="ew", pady=(0, 2))
             compact.columnconfigure(1, weight=1)
             compact.columnconfigure(3, weight=1)
             compact.columnconfigure(5, weight=1)
             for idx, key in enumerate((f"{prefix}_PORT", f"{prefix}_CTX_SIZE", f"{prefix}_THREADS")):
-                ttk.Label(compact, text=key.replace(f"{prefix}_", "").title(), style="Muted.TLabel").grid(row=0, column=idx * 2, sticky="w", padx=(0 if idx == 0 else 12, 4))
+                ttk.Label(compact, text=key.replace(f"{prefix}_", "").title(), style="Muted.TLabel").grid(row=0, column=idx * 2, sticky="w", padx=(0 if idx == 0 else 10, 4))
                 ttk.Entry(compact, textvariable=self._var(key), width=10).grid(row=0, column=idx * 2 + 1, sticky="ew")
+            if role == "embed":
+                row += 1
+                batch = ttk.Frame(parent, padding=(0, 2, 0, 0), style="Canvas.TFrame")
+                batch.grid(row=row, column=0, columnspan=5, sticky="ew", pady=(0, 2))
+                batch.columnconfigure(1, weight=1)
+                batch.columnconfigure(3, weight=1)
+                for idx, (label, key) in enumerate(
+                    (("Batch Size", "EMBED_BATCH_SIZE"), ("Ubatch Size", "EMBED_UBATCH_SIZE"))
+                ):
+                    ttk.Label(batch, text=label, style="Muted.TLabel").grid(row=0, column=idx * 2, sticky="w", padx=(0 if idx == 0 else 10, 4))
+                    ttk.Entry(batch, textvariable=self._var(key), width=10).grid(row=0, column=idx * 2 + 1, sticky="ew")
             return row + 1
 
         def _api_tester_block(self, parent, ttk, tk) -> None:
@@ -902,39 +983,6 @@ def run_gui() -> int:
 
             ttk.Label(parent, text="Chat / vision prompt", style="Headline.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
             self.chat_test_input = tk.Text(
-                parent,
-                height=4,
-                wrap="word",
-                bg=SURFACE_1,
-                fg=INK,
-                insertbackground=INK,
-                selectbackground=IBM_BLUE,
-                selectforeground=INVERSE_INK,
-                borderwidth=0,
-                highlightthickness=1,
-                highlightbackground=HAIRLINE,
-                highlightcolor=IBM_BLUE,
-                padx=10,
-                pady=8,
-                font=BODY_FONT,
-            )
-            self.chat_test_input.insert("1.0", "Describe this image, or answer this text-only prompt.")
-            self.chat_test_input.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-
-            image_row = ttk.Frame(parent, style="Canvas.TFrame")
-            image_row.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-            image_row.columnconfigure(1, weight=1)
-            ttk.Label(image_row, text="Image", style="Muted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
-            ttk.Entry(image_row, textvariable=self.test_image_path).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-            ttk.Button(image_row, text="Browse", command=self.browse_test_image).grid(row=0, column=2, sticky="e")
-            ttk.Button(image_row, text="Clear", command=lambda: self.test_image_path.set("")).grid(row=0, column=3, sticky="e", padx=(8, 0))
-
-            self.chat_test_button = ttk.Button(parent, text="Send Chat / Vision", command=self.run_chat_vision_test, style="Accent.TButton")
-            self.chat_test_button.grid(row=3, column=0, sticky="e", pady=(0, 8))
-
-            ttk.Separator(parent).grid(row=4, column=0, sticky="ew", pady=(0, 6))
-            ttk.Label(parent, text="Embedding text", style="Headline.TLabel").grid(row=5, column=0, sticky="w", pady=(0, 4))
-            self.embedding_test_input = tk.Text(
                 parent,
                 height=3,
                 wrap="word",
@@ -947,12 +995,45 @@ def run_gui() -> int:
                 highlightthickness=1,
                 highlightbackground=HAIRLINE,
                 highlightcolor=IBM_BLUE,
-                padx=10,
-                pady=8,
+                padx=8,
+                pady=6,
+                font=BODY_FONT,
+            )
+            self.chat_test_input.insert("1.0", "Describe this image, or answer this text-only prompt.")
+            self.chat_test_input.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+
+            image_row = ttk.Frame(parent, style="Canvas.TFrame")
+            image_row.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+            image_row.columnconfigure(1, weight=1)
+            ttk.Label(image_row, text="Image", style="Muted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            ttk.Entry(image_row, textvariable=self.test_image_path).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+            ttk.Button(image_row, text="Browse", command=self.browse_test_image).grid(row=0, column=2, sticky="e")
+            ttk.Button(image_row, text="Clear", command=lambda: self.test_image_path.set("")).grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+            self.chat_test_button = ttk.Button(parent, text="Send Chat / Vision", command=self.run_chat_vision_test, style="Accent.TButton")
+            self.chat_test_button.grid(row=3, column=0, sticky="e", pady=(0, 6))
+
+            ttk.Separator(parent).grid(row=4, column=0, sticky="ew", pady=(0, 5))
+            ttk.Label(parent, text="Embedding text", style="Headline.TLabel").grid(row=5, column=0, sticky="w", pady=(0, 4))
+            self.embedding_test_input = tk.Text(
+                parent,
+                height=2,
+                wrap="word",
+                bg=SURFACE_1,
+                fg=INK,
+                insertbackground=INK,
+                selectbackground=IBM_BLUE,
+                selectforeground=INVERSE_INK,
+                borderwidth=0,
+                highlightthickness=1,
+                highlightbackground=HAIRLINE,
+                highlightcolor=IBM_BLUE,
+                padx=8,
+                pady=6,
                 font=BODY_FONT,
             )
             self.embedding_test_input.insert("1.0", "Text to embed")
-            self.embedding_test_input.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+            self.embedding_test_input.grid(row=6, column=0, sticky="ew", pady=(0, 5))
             self.embedding_test_button = ttk.Button(parent, text="Embed Text", command=self.run_embedding_test, style="Accent.TButton")
             self.embedding_test_button.grid(row=7, column=0, sticky="e")
 
@@ -1011,7 +1092,7 @@ def run_gui() -> int:
         def _build_log_panel(self, parent, ttk, tk) -> None:
             parent.columnconfigure(0, weight=1)
             parent.rowconfigure(0, weight=1)
-            log_frame = ttk.LabelFrame(parent, text="Llama Server Logs", padding=10, style="Panel.TLabelframe")
+            log_frame = ttk.LabelFrame(parent, text="Llama Server Logs", padding=8, style="Panel.TLabelframe")
             log_frame.grid(row=0, column=0, sticky="nsew")
             log_frame.columnconfigure(0, weight=1)
             log_frame.rowconfigure(0, weight=1)
@@ -1024,7 +1105,7 @@ def run_gui() -> int:
                 tab.rowconfigure(0, weight=1)
                 text = tk.Text(
                     tab,
-                    height=7,
+                    height=6,
                     wrap="none",
                     bg=INVERSE_CANVAS,
                     fg=INVERSE_INK,
@@ -1033,8 +1114,8 @@ def run_gui() -> int:
                     selectforeground=INVERSE_INK,
                     borderwidth=0,
                     highlightthickness=0,
-                    padx=12,
-                    pady=8,
+                    padx=10,
+                    pady=6,
                     font=MONO_FONT,
                 )
                 text.grid(row=0, column=0, sticky="nsew")
@@ -1046,7 +1127,7 @@ def run_gui() -> int:
                 self.log_texts[role] = text
                 log_tabs.add(tab, text=ROLE_LABELS[role])
 
-            ttk.Button(log_frame, text="Refresh Logs", command=self.refresh_logs_once).grid(row=1, column=0, sticky="e", pady=(6, 0))
+            ttk.Button(log_frame, text="Refresh Logs", command=self.refresh_logs_once).grid(row=1, column=0, sticky="e", pady=(5, 0))
 
         def set_active_role(self, role: str) -> None:
             require_role(role)
