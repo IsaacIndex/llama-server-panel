@@ -7,5 +7,9 @@ script = ""
 
 [[actions]]
 name = "Publish Release"
-icon = "upload"
 command = "python scripts/publish_release.py"
+
+[[actions]]
+name = "run GUI"
+icon = "run"
+command = "python scripts/panel_gui.py"

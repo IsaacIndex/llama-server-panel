@@ -802,9 +802,11 @@ def run_gui() -> int:
             main_tabs.add(tester_tab, text="API Tester")
             self._api_tester_block(tester, ttk, tk)
 
-            logs_tab, logs = self._scrollable_tab_page(main_tabs, ttk, tk, padding=(6, 6, 6, 4))
+            logs_tab = ttk.Frame(main_tabs, padding=(6, 6, 6, 4), style="Canvas.TFrame")
+            logs_tab.columnconfigure(0, weight=1)
+            logs_tab.rowconfigure(0, weight=1)
             main_tabs.add(logs_tab, text="Logs")
-            self._build_log_panel(logs, ttk, tk)
+            self._build_log_panel(logs_tab, ttk, tk)
 
             output_frame = ttk.LabelFrame(main, text="Output", padding=8, style="Panel.TLabelframe")
             output_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0, 12))
