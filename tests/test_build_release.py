@@ -27,8 +27,9 @@ class BuildReleaseTest(unittest.TestCase):
         self.assertIn("--windowed", command)
 
     def test_pyinstaller_command_keeps_console_available_on_non_windows(self) -> None:
+        dist_platform_dir = Path("dist") / "macos-arm64"
         with patch.object(build_release.os, "name", "posix"):
-            command = build_release.pyinstaller_command(Path("dist") / "macos-arm64")
+            command = build_release.pyinstaller_command(dist_platform_dir)
 
         self.assertNotIn("--windowed", command)
 
