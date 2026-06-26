@@ -165,7 +165,48 @@ HEADER_COPY_WRAP = 720
 FIELD_LABEL_WIDTH = 12
 BASE_WINDOW_WIDTH = 1240
 BASE_WINDOW_HEIGHT = 820
+MIN_WINDOW_WIDTH = 1040
+MIN_WINDOW_HEIGHT = 600
+# Leave room for the desktop chrome that overlaps a maximised-height window:
+# the macOS menu bar plus the window title bar at the top, and the Dock (or a
+# Windows taskbar) at the bottom. Without this margin a window sized to the
+# full preferred height pushes its bottom row -- the health status bar -- under
+# the Dock, where it is invisible.
+WINDOW_TOP_INSET = 48
+WINDOW_BOTTOM_INSET = 100
+WINDOW_SIDE_INSET = 16
 MIN_UI_SCALE = 0.88
+
+
+def fit_window_geometry(
+    screen_width: int,
+    screen_height: int,
+    *,
+    base_width: int = BASE_WINDOW_WIDTH,
+    base_height: int = BASE_WINDOW_HEIGHT,
+    top_inset: int = WINDOW_TOP_INSET,
+    bottom_inset: int = WINDOW_BOTTOM_INSET,
+    side_inset: int = WINDOW_SIDE_INSET,
+) -> tuple[str, int, int]:
+    """Clamp the window to the usable screen area.
+
+    Returns ``(geometry, min_width, min_height)``. The window is sized to the
+    smaller of the preferred dimensions and the space left after reserving the
+    menu bar / title bar (``top_inset``) and the Dock / taskbar
+    (``bottom_inset``), then offset below the menu bar and centred. This keeps
+    the bottom status bar on screen instead of clipped under the Dock on
+    displays that are shorter than the preferred height.
+    """
+    avail_width = max(1, screen_width - 2 * side_inset)
+    avail_height = max(1, screen_height - top_inset - bottom_inset)
+    width = max(1, min(base_width, avail_width))
+    height = max(1, min(base_height, avail_height))
+    x = max(0, (screen_width - width) // 2)
+    y = top_inset
+    geometry = f"{width}x{height}+{x}+{y}"
+    min_width = min(MIN_WINDOW_WIDTH, width)
+    min_height = min(MIN_WINDOW_HEIGHT, height)
+    return (geometry, min_width, min_height)
 
 
 @dataclass
@@ -876,8 +917,11 @@ def run_gui() -> int:
             self._resize_after_id: Optional[str] = None
 
             self.root.title("Llama Server Panel")
-            self.root.geometry("1240x820")
-            self.root.minsize(1040, 680)
+            geometry, min_width, min_height = fit_window_geometry(
+                self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            )
+            self.root.geometry(geometry)
+            self.root.minsize(min_width, min_height)
 
             style = ttk.Style()
             if "clam" in style.theme_names():

@@ -27,6 +27,7 @@ from panel_gui import (
     default_mono_family,
     embedding_model_id_for_config,
     extract_chat_text,
+    fit_window_geometry,
     gui_override_path,
     health_endpoint,
     image_data_url,
@@ -531,6 +532,32 @@ class PanelGuiStatusHelpersTest(unittest.TestCase):
             "chat running  ·  gateway 127.0.0.1:8088",
         )
         self.assertEqual(active_summary([], "role proxies"), "role proxies")
+
+
+class FitWindowGeometryTest(unittest.TestCase):
+    @staticmethod
+    def _parse(geometry: str) -> tuple[int, int, int, int]:
+        size, x, y = geometry.replace("+", " +").split()
+        width, height = (int(part) for part in size.split("x"))
+        return (width, height, int(x), int(y))
+
+    def test_keeps_status_bar_clear_of_dock_on_short_screen(self) -> None:
+        # A 1280x800 laptop cannot fit the preferred 820px-tall window once the
+        # menu bar and Dock are accounted for; the window must shrink so its
+        # bottom (the status bar) stays above the Dock.
+        geometry, _, min_height = fit_window_geometry(1280, 800)
+        width, height, _, y = self._parse(geometry)
+        self.assertLessEqual(y + height, 800 - 100)
+        self.assertLessEqual(width, 1240)
+        self.assertLessEqual(min_height, height)
+
+    def test_uses_preferred_size_on_tall_screen(self) -> None:
+        geometry, min_width, min_height = fit_window_geometry(1920, 1080)
+        width, height, x, y = self._parse(geometry)
+        self.assertEqual((width, height), (1240, 820))
+        self.assertGreater(x, 0)
+        self.assertEqual(y, 48)
+        self.assertEqual((min_width, min_height), (1040, 600))
 
 
 if __name__ == "__main__":
