@@ -248,6 +248,21 @@ class ModelJugglerStartupTest(unittest.TestCase):
         self.assertEqual(write_json.call_args.args[1], 200)
         self.assertEqual(write_json.call_args.args[2]["data"][0]["id"], "Qwen3-Embedding-4B-Q6_K.gguf")
 
+    def test_request_loggers_tolerate_missing_stderr(self) -> None:
+        # PyInstaller --windowed builds set sys.stderr to None. log_request runs
+        # inside send_response *before* any byte is written, so a logger that
+        # raises here aborts the response and the client sees an empty reply
+        # (RemoteDisconnected). The loggers must therefore never raise.
+        state = SimpleNamespace(roles={})
+        for factory in (
+            model_juggler.make_handler("embed", state),
+            model_juggler.make_gateway_handler(state),
+        ):
+            handler = factory.__new__(factory)
+            handler.client_address = ("127.0.0.1", 12345)
+            with patch.object(model_juggler.sys, "stderr", None):
+                handler.log_message('"%s" %s', "GET /v1/models HTTP/1.1", 200)
+
     def test_main_dry_run_forwards_role_proxy_bind_overrides(self) -> None:
         roles: dict[str, RoleRuntime] = {}
 

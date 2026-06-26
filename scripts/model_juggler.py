@@ -74,6 +74,23 @@ CLIENT_DISCONNECT_ERRORS = (
 )
 
 
+def log_to_stderr(message: str) -> None:
+    """Write a diagnostic line to stderr, tolerating a missing stream.
+
+    PyInstaller ``--windowed`` builds set ``sys.stderr`` to ``None``. Without this
+    guard the request loggers raise ``AttributeError`` inside ``send_response``
+    (which calls ``log_request`` before writing any bytes), so every proxied
+    request returns an empty reply / ``RemoteDisconnected``.
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        stream.write(message)
+    except (ValueError, OSError):
+        pass
+
+
 class ModelBusy(Exception):
     pass
 
@@ -627,7 +644,7 @@ def _proxy_embed_with_escalation(
                 _relay_buffered_response(handler, status, reason, raw_headers, resp_body)
                 return
 
-            sys.stderr.write(
+            log_to_stderr(
                 f"[embed] input too large for batch {current_batch}; "
                 f"escalating physical batch to {target} and retrying\n"
             )
@@ -640,7 +657,7 @@ def _proxy_embed_with_escalation(
             try:
                 state.restart_embed_with_batch(None)
             except Exception as exc:
-                sys.stderr.write(f"[embed] failed to revert batch size: {exc}\n")
+                log_to_stderr(f"[embed] failed to revert batch size: {exc}\n")
 
 
 def proxy_request(
@@ -827,7 +844,7 @@ def make_gateway_handler(state: JugglerState):
             self.end_headers()
 
         def log_message(self, fmt: str, *args: object) -> None:
-            sys.stderr.write(f"[gateway] {self.address_string()} - {fmt % args}\n")
+            log_to_stderr(f"[gateway] {self.address_string()} - {fmt % args}\n")
 
     return GatewayHandler
 
@@ -849,7 +866,7 @@ def make_handler(role: str, state: JugglerState):
             proxy_request(self, state, role)
 
         def log_message(self, fmt: str, *args: object) -> None:
-            sys.stderr.write(f"[{role}] {self.address_string()} - {fmt % args}\n")
+            log_to_stderr(f"[{role}] {self.address_string()} - {fmt % args}\n")
 
     return RoleProxyHandler
 

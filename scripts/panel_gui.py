@@ -697,7 +697,36 @@ def configure_carbon_style(root, style, *, scale: float = 1.0) -> None:
     style.configure("Horizontal.TScrollbar", background=SURFACE_1, troughcolor=CANVAS, bordercolor=CANVAS, arrowcolor=IBM_BLUE)
 
 
+def ensure_std_streams() -> None:
+    """Give the process real stdout/stderr when launched as a windowed exe.
+
+    PyInstaller ``--windowed`` builds run without a console, so ``sys.stdout`` and
+    ``sys.stderr`` are ``None``. Any code that writes to them (the juggler request
+    loggers, inline backend logs) would crash; for the HTTP handlers that crash
+    happens inside ``send_response`` before a byte is written, turning every
+    request into an empty reply / ``RemoteDisconnected``. Point the missing
+    streams at a log file so output is captured instead of fatal.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    target = None
+    try:
+        log_dir = repo_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        target = open(log_dir / "panel-console.log", "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        try:
+            target = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            return
+    if sys.stdout is None:
+        sys.stdout = target
+    if sys.stderr is None:
+        sys.stderr = target
+
+
 def run_gui() -> int:
+    ensure_std_streams()
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox, ttk
