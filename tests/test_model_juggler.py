@@ -291,6 +291,21 @@ class EmbedBatchEscalationTest(unittest.TestCase):
         self.assertEqual(model_juggler._required_tokens_from_error(body), 4391)
         self.assertIsNone(model_juggler._required_tokens_from_error(b"too large to process"))
 
+    def test_next_embed_batch_size_uses_aligned_target(self) -> None:
+        self.assertEqual(model_juggler._next_embed_batch_size(5000, 5145), 5632)
+        self.assertEqual(model_juggler._next_embed_batch_size(4096, 4391), 4608)
+        self.assertEqual(model_juggler._next_embed_batch_size(0, None), 512)
+
+    def test_next_embed_batch_size_honors_max_cap(self) -> None:
+        self.assertEqual(
+            model_juggler._next_embed_batch_size(model_juggler.EMBED_BATCH_MAX - 32, None),
+            model_juggler.EMBED_BATCH_MAX,
+        )
+        self.assertEqual(
+            model_juggler._next_embed_batch_size(4096, model_juggler.EMBED_BATCH_MAX * 2),
+            model_juggler.EMBED_BATCH_MAX,
+        )
+
     def _fake_conn(self, status: int, body: bytes):
         read_sizes: list[object] = []
         chunks = [body, b""]
@@ -340,7 +355,7 @@ class EmbedBatchEscalationTest(unittest.TestCase):
         state.restart_embed_with_batch.side_effect = restart
 
         conns = [self._fake_conn(500, too_large), self._fake_conn(200, ok)]
-        target_batch = 4391 + model_juggler.EMBED_BATCH_ESCALATION_MARGIN
+        target_batch = 4608
 
         with patch("model_juggler.http.client.HTTPConnection", side_effect=conns):
             handler = self._fake_handler()
@@ -412,6 +427,33 @@ class EmbedBatchEscalationTest(unittest.TestCase):
         state.stop_process.assert_called_once_with("embed")
         state.ensure_process.assert_called_once_with("embed")
         self.assertEqual(runtime.batch_size_override, 8192)
+
+    def test_restart_restores_prior_batch_override_when_startup_fails(self) -> None:
+        runtime = RoleRuntime("embed", 8081, 18181, "127.0.0.1", "127.0.0.1", Path("/tmp/embed.log"))
+        runtime.batch_size_override = 2048
+        state = model_juggler.JugglerState(
+            {"embed": runtime},
+            auto_tune=False,
+            switch_timeout=1.0,
+            startup_timeout=1.0,
+            request_timeout=1.0,
+        )
+        state.stop_process = Mock()  # type: ignore[method-assign]
+        seen_overrides: list[int | None] = []
+
+        def ensure(_role: str) -> None:
+            seen_overrides.append(runtime.batch_size_override)
+            if len(seen_overrides) == 1:
+                raise StartupError("bad batch")
+
+        state.ensure_process = Mock(side_effect=ensure)  # type: ignore[method-assign]
+
+        with self.assertRaises(StartupError):
+            state.restart_embed_with_batch(5632)
+
+        self.assertEqual(seen_overrides, [5632, 2048])
+        self.assertEqual(runtime.batch_size_override, 2048)
+        self.assertEqual([args.args for args in state.stop_process.call_args_list], [("embed",), ("embed",)])
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ EMBED_BATCH_TOKENS_RE = re.compile(r"input\s*\((\d+)\s*tokens?\)", re.IGNORECASE
 # Safety headroom multiplier / additive margin when escalating the batch so the
 # offending chunk comfortably fits, plus an absolute ceiling to avoid OOM.
 EMBED_BATCH_ESCALATION_MARGIN = 64
+EMBED_BATCH_ALIGNMENT = 512
 EMBED_BATCH_MAX = 131072
 # Max number of escalation attempts for a single oversized request.
 EMBED_BATCH_MAX_ATTEMPTS = 4
@@ -308,9 +309,19 @@ class JugglerState:
             with self.switch_lock:
                 if runtime.batch_size_override == batch_size_override and runtime.process and runtime.process.poll() is None:
                     return runtime.backend_port
+                previous_batch_size_override = runtime.batch_size_override
                 self.stop_process("embed")
                 runtime.batch_size_override = batch_size_override
-                self.ensure_process("embed")
+                try:
+                    self.ensure_process("embed")
+                except Exception:
+                    self.stop_process("embed")
+                    runtime.batch_size_override = previous_batch_size_override
+                    try:
+                        self.ensure_process("embed")
+                    except Exception as restore_exc:
+                        log_to_stderr(f"[embed] failed to restore previous batch size: {restore_exc}\n")
+                    raise
         finally:
             with self.embed_request_cv:
                 self.embed_resizing = False
@@ -581,6 +592,24 @@ def _required_tokens_from_error(body: bytes) -> Optional[int]:
         return None
 
 
+def _aligned_embed_batch_size(value: int) -> int:
+    if value <= 0:
+        value = EMBED_BATCH_ESCALATION_MARGIN
+    remainder = value % EMBED_BATCH_ALIGNMENT
+    if remainder:
+        value += EMBED_BATCH_ALIGNMENT - remainder
+    return min(value, EMBED_BATCH_MAX)
+
+
+def _next_embed_batch_size(current_batch: int, required_tokens: Optional[int]) -> int:
+    if required_tokens is not None:
+        target = required_tokens + EMBED_BATCH_ESCALATION_MARGIN
+    else:
+        target = max(current_batch, 1) * 2
+    target = max(target, current_batch + EMBED_BATCH_ESCALATION_MARGIN)
+    return _aligned_embed_batch_size(target)
+
+
 def _proxy_embed_with_escalation(
     handler: BaseHTTPRequestHandler,
     state: JugglerState,
@@ -630,15 +659,7 @@ def _proxy_embed_with_escalation(
             attempts += 1
             required = _required_tokens_from_error(resp_body)
             current_batch = runtime.batch_size_override or state.embed_configured_batch_size()
-            if required is not None:
-                target = required + EMBED_BATCH_ESCALATION_MARGIN
-            else:
-                # No token count reported: double the current batch as a fallback.
-                target = max(current_batch, 1) * 2
-            # Never shrink, always grow past whatever we are currently at.
-            target = max(target, current_batch + EMBED_BATCH_ESCALATION_MARGIN)
-            if target > EMBED_BATCH_MAX:
-                target = EMBED_BATCH_MAX
+            target = _next_embed_batch_size(current_batch, required)
             if target <= current_batch:
                 # Cannot grow any further; surface the original error.
                 _relay_buffered_response(handler, status, reason, raw_headers, resp_body)
