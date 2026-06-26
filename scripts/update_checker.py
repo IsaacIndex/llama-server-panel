@@ -360,24 +360,52 @@ def download_update_archive(
 def _installer_script_contents() -> str:
     names = [executable_name(), VERSION_FILE_NAME, "README.md", ".env.example", "LICENSE", "SECURITY.md"]
     if os.name == "nt":
-        copy_commands = "\n".join(
+        exe = executable_name()
+        doc_copy_commands = "\n".join(
             f'if exist "%SOURCE_DIR%\\{name}" copy /Y "%SOURCE_DIR%\\{name}" "%INSTALL_DIR%\\{name}" >nul'
-            for name in names
+            for name in names[1:]
         )
+        # The app runs as a PyInstaller onefile bundle: a bootloader parent process
+        # (PPID) re-launches the Python app (PID) and only deletes its _MEI temp dir
+        # AFTER the app exits, while keeping the .exe locked. Waiting for the app PID
+        # alone let the copy/relaunch race that teardown, leaving the new instance
+        # unable to find its extracted _MEI files (base_library.zip / pythonXX.dll).
+        # So wait for BOTH processes, settle, rename the (possibly still-locked) exe
+        # aside before copying, relaunch fully detached, and log each step.
         return f"""@echo off
-setlocal
+setlocal enableextensions
 set "PID=%~1"
 set "SOURCE_DIR=%~2"
 set "INSTALL_DIR=%~3"
 set "EXE_PATH=%~4"
+set "PPID=%~5"
+set "LOG=%INSTALL_DIR%\\update-install.log"
+echo [%date% %time%] installer started pid=%PID% ppid=%PPID%>>"%LOG%"
 :wait
 tasklist /FI "PID eq %PID%" | find "%PID%" >nul
 if not errorlevel 1 (
   timeout /t 1 /nobreak >nul
   goto wait
 )
-{copy_commands}
-start "" /B "%EXE_PATH%"
+:waitparent
+tasklist /FI "PID eq %PPID%" | find "%PPID%" >nul
+if not errorlevel 1 (
+  timeout /t 1 /nobreak >nul
+  goto waitparent
+)
+echo [%date% %time%] app and bootloader exited>>"%LOG%"
+timeout /t 2 /nobreak >nul
+if exist "%EXE_PATH%" (
+  del /F /Q "%EXE_PATH%.old" >nul 2>&1
+  ren "%EXE_PATH%" "{exe}.old" >nul 2>&1
+)
+if exist "%SOURCE_DIR%\\{exe}" copy /Y "%SOURCE_DIR%\\{exe}" "%INSTALL_DIR%\\{exe}" >nul
+echo [%date% %time%] exe copy errorlevel=%errorlevel%>>"%LOG%"
+{doc_copy_commands}
+del /F /Q "%EXE_PATH%.old" >nul 2>&1
+echo [%date% %time%] files copied, relaunching>>"%LOG%"
+start "" "%EXE_PATH%"
+echo [%date% %time%] relaunch issued>>"%LOG%"
 """
 
     copy_commands = "\n".join(
@@ -409,16 +437,20 @@ def start_installer_process(source_dir: Path, install_dir: Path, executable: Pat
     suffix = ".cmd" if os.name == "nt" else ".sh"
     script_path = Path(tempfile.mkdtemp(prefix="llama-panel-install-")) / f"install-update{suffix}"
     script_path.write_text(_installer_script_contents(), encoding="utf-8")
+    # In a PyInstaller onefile bundle os.getppid() is the bootloader parent that holds
+    # the exe lock and cleans up the _MEI temp dir; the installer waits for it too.
+    pid = str(os.getpid())
+    ppid = str(os.getppid())
     if os.name != "nt":
         script_path.chmod(0o700)
         subprocess.Popen(
-            [str(script_path), str(os.getpid()), str(source_dir), str(install_dir), str(executable)],
+            [str(script_path), pid, str(source_dir), str(install_dir), str(executable), ppid],
             close_fds=True,
             start_new_session=True,
         )
     else:
         subprocess.Popen(
-            ["cmd", "/c", str(script_path), str(os.getpid()), str(source_dir), str(install_dir), str(executable)],
+            ["cmd", "/c", str(script_path), pid, str(source_dir), str(install_dir), str(executable), ppid],
             close_fds=True,
             **installer_process_kwargs(),
         )

@@ -35,6 +35,7 @@ from update_checker import (
     parse_latest_release,
     parse_checksum_file,
     resolve_update_repo,
+    start_installer_process,
     verify_archive_checksum,
 )
 
@@ -264,10 +265,43 @@ class UpdateCheckerTest(unittest.TestCase):
         self.assertIn('set "SOURCE_DIR=%~2"', script)
         self.assertIn('set "INSTALL_DIR=%~3"', script)
         self.assertIn('set "EXE_PATH=%~4"', script)
+        self.assertIn('set "PPID=%~5"', script)
         self.assertIn('tasklist /FI "PID eq %PID%"', script)
+        self.assertIn('tasklist /FI "PID eq %PPID%"', script)
         self.assertIn("timeout /t 1 /nobreak >nul", script)
         self.assertIn('if exist "%SOURCE_DIR%\\llama-server-panel.exe" copy /Y', script)
-        self.assertIn('start "" /B "%EXE_PATH%"', script)
+        # The locked exe is renamed aside before the fresh copy lands on it.
+        self.assertIn('ren "%EXE_PATH%" "llama-server-panel.exe.old"', script)
+        # Each step is logged so a future failure leaves evidence on disk.
+        self.assertIn('>>"%LOG%"', script)
+        # Relaunch must be detached (its own process group), not tied to the
+        # exiting installer console via /B, or onefile extraction races teardown.
+        self.assertIn('start "" "%EXE_PATH%"', script)
+        self.assertNotIn("/B", script)
+
+    def test_start_installer_process_passes_app_and_bootloader_pids(self) -> None:
+        # os.name is left as the real platform: patching it to "nt" would flip
+        # pathlib to WindowsPath and break Path construction off-Windows. Both the
+        # posix and nt branches append os.getppid() identically, so the real branch
+        # exercises the behavior we care about: the bootloader PID is forwarded last.
+        captured: dict[str, list[str]] = {}
+
+        def fake_popen(args, **kwargs):
+            captured["args"] = args
+            return object()
+
+        with (
+            patch.object(sys.modules["update_checker"].os, "getpid", return_value=111),
+            patch.object(sys.modules["update_checker"].os, "getppid", return_value=222),
+            patch.object(sys.modules["update_checker"].subprocess, "Popen", fake_popen),
+        ):
+            start_installer_process(Path("src"), Path("install"), Path("install/app.exe"))
+
+        args = captured["args"]
+        self.assertIn("111", args)
+        self.assertEqual(args[-1], "222")
+        # PID is forwarded before SOURCE/INSTALL/EXE, bootloader PID strictly after.
+        self.assertLess(args.index("111"), args.index("222"))
 
     def test_installer_process_kwargs_windows_hides_cmd_window(self) -> None:
         with (
