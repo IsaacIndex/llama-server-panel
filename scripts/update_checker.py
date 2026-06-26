@@ -404,6 +404,16 @@ echo [%date% %time%] exe copy errorlevel=%errorlevel%>>"%LOG%"
 {doc_copy_commands}
 del /F /Q "%EXE_PATH%.old" >nul 2>&1
 echo [%date% %time%] files copied, relaunching>>"%LOG%"
+rem This cmd inherited the running app's environment, including the onefile
+rem bootloader's _MEIPASS2 (the path to its now-deleted _MEI temp dir). The
+rem bootloader treats _MEIPASS2 as "already extracted, reuse this dir", so a
+rem relaunched exe that inherits it skips extraction and dies loading
+rem base_library.zip from the gone directory. Clear it (and siblings across
+rem PyInstaller versions) so the fresh instance extracts its own _MEI dir.
+set "_MEIPASS2="
+set "_PYI_APPLICATION_HOME_DIR="
+set "_PYI_PARENT_PROCESS_LEVEL="
+set "_PYI_ONEDIR_MODE="
 start "" "%EXE_PATH%"
 echo [%date% %time%] relaunch issued>>"%LOG%"
 """
@@ -422,6 +432,10 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 {copy_commands}
 chmod +x "$install_dir/{executable_name()}"
+# Same onefile hazard as Windows: this shell inherited _MEIPASS2 (the deleted
+# _MEI extraction dir) from the exiting app. Clear it so the relaunched binary
+# extracts fresh instead of reusing the gone directory.
+unset _MEIPASS2 _PYI_APPLICATION_HOME_DIR _PYI_PARENT_PROCESS_LEVEL _PYI_ONEDIR_MODE
 "$exe_path" >/dev/null 2>&1 &
 """
 

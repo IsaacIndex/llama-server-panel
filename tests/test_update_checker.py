@@ -278,6 +278,23 @@ class UpdateCheckerTest(unittest.TestCase):
         # exiting installer console via /B, or onefile extraction races teardown.
         self.assertIn('start "" "%EXE_PATH%"', script)
         self.assertNotIn("/B", script)
+        # The onefile bootloader treats _MEIPASS2 as "already extracted, reuse this
+        # dir". The cmd inherits it from the running (child) app, so it must be
+        # cleared before relaunch or the new exe reuses the deleted _MEI temp dir
+        # and dies with "base_library.zip: No such file or directory".
+        self.assertIn('set "_MEIPASS2="', script)
+        meipass_clear = script.index('set "_MEIPASS2="')
+        relaunch = script.index('start "" "%EXE_PATH%"')
+        self.assertLess(meipass_clear, relaunch)
+
+    def test_installer_script_contents_posix_clears_onefile_env_before_relaunch(self) -> None:
+        with patch("update_checker.os.name", "posix"):
+            script = _installer_script_contents()
+
+        # Same onefile hazard as Windows: the relaunched binary must not inherit
+        # _MEIPASS2 from the exiting app, or it reuses the deleted extraction dir.
+        self.assertIn("unset _MEIPASS2", script)
+        self.assertLess(script.index("unset _MEIPASS2"), script.index('"$exe_path"'))
 
     def test_start_installer_process_passes_app_and_bootloader_pids(self) -> None:
         # os.name is left as the real platform: patching it to "nt" would flip
