@@ -16,26 +16,34 @@ if str(SCRIPTS) not in sys.path:
 
 from llama_runtime import PanelError, load_config
 from panel_gui import (
+    active_summary,
     build_chat_payload,
     build_embedding_payload,
     build_gui_overrides,
     chat_model_id_for_role,
     compact_path_value,
+    connect_host,
     default_assign_key_for_role,
+    default_mono_family,
     embedding_model_id_for_config,
     extract_chat_text,
     gui_override_path,
+    health_endpoint,
     image_data_url,
     import_model_file,
     log_config_from_values,
+    log_freshness_label,
     model_dir_from_value,
     model_config_value,
+    panel_log_line,
+    ping_health,
     post_json,
     role_log_display_text,
     role_log_path,
     save_gui_overrides,
     start_status_for_auto_tune,
     summarize_embedding_response,
+    summarize_health,
     tail_file_text,
 )
 
@@ -421,6 +429,108 @@ class PanelGuiHelpersTest(unittest.TestCase):
 
             self.assertIn("server startup", text)
             self.assertNotIn("Auto-tune log", text)
+
+    def test_role_log_display_includes_freshness_for_each_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            panel_dir = Path(tmp)
+            log_dir = panel_dir / "logs"
+            log_dir.mkdir()
+            (log_dir / "chat-gui.log").write_text("server startup\n", encoding="utf-8")
+
+            text = role_log_display_text({"LOG_DIR": str(log_dir)}, "chat", panel_dir=panel_dir)
+
+        self.assertRegex(text, r"GUI/server log: .* \(updated \d\d:\d\d:\d\d\) ==")
+
+
+class PanelGuiStatusHelpersTest(unittest.TestCase):
+    def test_default_mono_family_is_platform_specific(self) -> None:
+        self.assertEqual(default_mono_family("win32"), "Consolas")
+        self.assertEqual(default_mono_family("darwin"), "Menlo")
+        self.assertEqual(default_mono_family("linux"), "DejaVu Sans Mono")
+
+    def test_panel_log_line_prefixes_timestamp(self) -> None:
+        line = panel_log_line("[panel] preparing chat launch")
+
+        self.assertRegex(line, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[panel\] preparing chat launch\n$")
+
+    def test_log_freshness_label_handles_missing_and_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            present = Path(tmp) / "chat-gui.log"
+            present.write_text("hello\n", encoding="utf-8")
+
+            self.assertRegex(log_freshness_label(present), r"^\(updated \d\d:\d\d:\d\d\)$")
+            self.assertEqual(log_freshness_label(Path(tmp) / "missing.log"), "(no file)")
+
+    def test_connect_host_normalizes_wildcards(self) -> None:
+        self.assertEqual(connect_host("0.0.0.0"), "127.0.0.1")
+        self.assertEqual(connect_host("::"), "127.0.0.1")
+        self.assertEqual(connect_host("localhost"), "127.0.0.1")
+        self.assertEqual(connect_host(""), "127.0.0.1")
+        self.assertEqual(connect_host("192.168.1.5"), "192.168.1.5")
+
+    def test_health_endpoint_uses_connectable_host(self) -> None:
+        self.assertEqual(health_endpoint("0.0.0.0", 8080), "http://127.0.0.1:8080/health")
+        self.assertEqual(health_endpoint("10.0.0.2", 8081), "http://10.0.0.2:8081/health")
+
+    def test_ping_health_reports_latency_on_success(self) -> None:
+        class HealthOk:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b"ok"
+
+        with patch("panel_gui.urllib.request.urlopen", return_value=HealthOk()):
+            ok, latency = ping_health("http://local.test/health")
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(latency)
+        self.assertGreaterEqual(latency, 0.0)
+
+    def test_ping_health_reports_down_on_http_error(self) -> None:
+        error = urllib.error.HTTPError("http://local.test/health", 503, "loading", {}, io.BytesIO(b"loading"))
+
+        with patch("panel_gui.urllib.request.urlopen", side_effect=error):
+            ok, latency = ping_health("http://local.test/health")
+
+        self.assertFalse(ok)
+        self.assertIsNotNone(latency)
+
+    def test_ping_health_reports_no_latency_on_connection_error(self) -> None:
+        with patch("panel_gui.urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+            ok, latency = ping_health("http://local.test/health")
+
+        self.assertFalse(ok)
+        self.assertIsNone(latency)
+
+    def test_summarize_health_levels(self) -> None:
+        self.assertEqual(summarize_health([]), ("idle", "no roles running"))
+
+        level, detail = summarize_health([("chat", True, 12.0), ("embed", True, 8.0)])
+        self.assertEqual(level, "healthy")
+        self.assertEqual(detail, "chat 12ms · embed 8ms")
+
+        level, detail = summarize_health([("vision", True, 2300.0), ("chat", True, 9.0)])
+        self.assertEqual(level, "degraded")
+        self.assertIn("vision 2300ms", detail)
+
+        level, detail = summarize_health([("chat", False, None), ("embed", True, 8.0)])
+        self.assertEqual(level, "down")
+        self.assertIn("chat no response", detail)
+
+    def test_active_summary_combines_roles_and_endpoint(self) -> None:
+        self.assertEqual(active_summary([]), "no roles running")
+        self.assertEqual(active_summary(["chat", "embed"]), "chat · embed running")
+        self.assertEqual(
+            active_summary(["chat"], "gateway 127.0.0.1:8088"),
+            "chat running  ·  gateway 127.0.0.1:8088",
+        )
+        self.assertEqual(active_summary([], "role proxies"), "role proxies")
 
 
 if __name__ == "__main__":

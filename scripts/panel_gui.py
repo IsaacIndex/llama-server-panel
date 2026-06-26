@@ -13,8 +13,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional
@@ -106,6 +108,15 @@ PATH_KEYS = {
 API_TIMEOUT_SECONDS = 3600
 LOG_TAIL_BYTES = 64 * 1024
 LOG_REFRESH_INTERVAL_MS = 1000
+HEALTH_REFRESH_INTERVAL_MS = 5000
+HEALTH_PING_TIMEOUT_SECONDS = 3.0
+HEALTH_SLOW_MS = 1500.0
+HEALTH_PRESENTATION = {
+    "healthy": ("HealthOk.TLabel", "Healthy"),
+    "degraded": ("HealthWarn.TLabel", "Degraded"),
+    "down": ("HealthBad.TLabel", "Down"),
+    "idle": ("HealthIdle.TLabel", "Idle"),
+}
 AUTO_TUNE_CANDIDATE_TAIL_BYTES = 8 * 1024
 AUTO_TUNE_CANDIDATE_LOG_LIMIT = 3
 MAX_TEST_IMAGE_BYTES = 20 * 1024 * 1024
@@ -129,13 +140,27 @@ HAIRLINE = "#e0e0e0"
 SUCCESS = "#24a148"
 WARNING = "#f1c21b"
 ERROR = "#da1e28"
+def default_mono_family(platform: str = sys.platform) -> str:
+    """Pick a monospace family that actually exists on the host platform.
+
+    ``Menlo`` only ships on macOS; on Windows Tk silently falls back to a
+    proportional default that mangles log alignment (the "unreadable" logs),
+    so map each platform to a font that is present by default.
+    """
+    if platform.startswith("win"):
+        return "Consolas"
+    if platform == "darwin":
+        return "Menlo"
+    return "DejaVu Sans Mono"
+
+
 DISPLAY_FONT = ("IBM Plex Sans", 20, "normal")
 HEADLINE_FONT = ("IBM Plex Sans", 12, "bold")
 TITLE_FONT = ("IBM Plex Sans", 11, "bold")
 BODY_FONT = ("IBM Plex Sans", 10, "normal")
 BODY_EMPHASIS_FONT = ("IBM Plex Sans", 10, "bold")
 CAPTION_FONT = ("IBM Plex Sans", 10, "normal")
-MONO_FONT = ("Menlo", 9, "normal")
+MONO_FONT = (default_mono_family(), 9, "normal")
 HEADER_COPY_WRAP = 720
 FIELD_LABEL_WIDTH = 12
 BASE_WINDOW_WIDTH = 1240
@@ -413,6 +438,82 @@ def post_json(url: str, payload: Mapping[str, object], *, timeout: int = API_TIM
     return decoded
 
 
+def connect_host(host: str) -> str:
+    """Resolve a bind host to something a client can actually connect to."""
+    if host in {"0.0.0.0", "::", "localhost", ""}:
+        return "127.0.0.1"
+    return host
+
+
+def health_endpoint(host: str, port: int) -> str:
+    return f"http://{connect_host(host)}:{port}/health"
+
+
+def ping_health(url: str, *, timeout: float = HEALTH_PING_TIMEOUT_SECONDS) -> tuple[bool, Optional[float]]:
+    """GET a ``/health`` endpoint, returning ``(ok, latency_ms)``.
+
+    ``ok`` is only true for a 200 response. A non-200 reply or any connection
+    error returns ``(False, ...)`` so the caller can flag the role as down.
+    """
+    request = urllib.request.Request(url, method="GET")
+    api_key = os.environ.get("LLAMA_API_KEY")
+    if api_key:
+        request.add_header("Authorization", f"Bearer {api_key}")
+    start = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read()
+            latency_ms = (time.monotonic() - start) * 1000.0
+            return (getattr(response, "status", 200) == 200, latency_ms)
+    except urllib.error.HTTPError:
+        return (False, (time.monotonic() - start) * 1000.0)
+    except Exception:
+        return (False, None)
+
+
+def summarize_health(
+    results: Iterable[tuple[str, bool, Optional[float]]],
+    *,
+    slow_ms: float = HEALTH_SLOW_MS,
+) -> tuple[str, str]:
+    """Reduce per-role ping results to a ``(level, detail)`` status summary.
+
+    ``level`` is one of ``healthy``/``degraded``/``down``/``idle``. ``results``
+    is an iterable of ``(label, ok, latency_ms)`` for active roles only.
+    """
+    parts: list[str] = []
+    has_down = False
+    has_slow = False
+    for label, ok, latency_ms in results:
+        if not ok or latency_ms is None:
+            parts.append(f"{label} no response")
+            has_down = True
+        else:
+            parts.append(f"{label} {int(round(latency_ms))}ms")
+            if latency_ms > slow_ms:
+                has_slow = True
+    if not parts:
+        return ("idle", "no roles running")
+    if has_down:
+        level = "down"
+    elif has_slow:
+        level = "degraded"
+    else:
+        level = "healthy"
+    return (level, " · ".join(parts))
+
+
+def active_summary(running_roles: Iterable[str], juggler_endpoint: str = "") -> str:
+    """Describe which roles and juggler endpoint are currently live."""
+    roles = [role for role in running_roles]
+    parts: list[str] = []
+    if roles:
+        parts.append(f"{' · '.join(roles)} running")
+    if juggler_endpoint:
+        parts.append(juggler_endpoint)
+    return "  ·  ".join(parts) if parts else "no roles running"
+
+
 def default_assign_key_for_role(role: str) -> str:
     try:
         return ROLE_ASSIGN_KEYS[role]
@@ -524,6 +625,20 @@ def auto_tune_candidate_log_paths(tune_text: str, *, tune_dir: Path) -> list[Pat
     return paths
 
 
+def panel_log_line(message: str) -> str:
+    """Format a panel-authored log line with a readable wall-clock timestamp."""
+    return f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}\n"
+
+
+def log_freshness_label(path: Path) -> str:
+    """Return a short ``(updated HH:MM:SS)`` suffix from the file's mtime."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return "(no file)"
+    return f"(updated {datetime.fromtimestamp(mtime).strftime('%H:%M:%S')})"
+
+
 def tail_file_text(path: Path, *, max_bytes: int = LOG_TAIL_BYTES) -> str:
     try:
         size = path.stat().st_size
@@ -567,7 +682,7 @@ def role_log_display_text(config: Mapping[str, str], role: str, *, panel_dir: Pa
     ]
     for label, log_path in role_log_sources(config, role):
         sections.append(
-            f"== {ROLE_LABELS[role]} {label}: {log_path} ==\n"
+            f"== {ROLE_LABELS[role]} {label}: {log_path} {log_freshness_label(log_path)} ==\n"
             f"{tail_file_text(log_path, max_bytes=max_bytes)}"
         )
     tune_path = auto_tune_log_path(panel_dir)
@@ -642,6 +757,14 @@ def configure_carbon_style(root, style, *, scale: float = 1.0) -> None:
     style.configure("Status.TLabel", background=CANVAS, foreground=IBM_BLUE, font=body_emphasis_font)
     style.configure("Inverse.TLabel", background=INVERSE_CANVAS, foreground=INVERSE_INK, font=body_font)
     style.configure("InverseMuted.TLabel", background=INVERSE_CANVAS, foreground="#c6c6c6", font=caption_font)
+
+    style.configure("StatusBar.TFrame", background=SURFACE_1)
+    style.configure("StatusBarText.TLabel", background=SURFACE_1, foreground=INK, font=body_emphasis_font)
+    style.configure("StatusBarMuted.TLabel", background=SURFACE_1, foreground=INK_MUTED, font=body_font)
+    style.configure("HealthOk.TLabel", background=SURFACE_1, foreground=SUCCESS, font=body_emphasis_font)
+    style.configure("HealthWarn.TLabel", background=SURFACE_1, foreground=WARNING, font=body_emphasis_font)
+    style.configure("HealthBad.TLabel", background=SURFACE_1, foreground=ERROR, font=body_emphasis_font)
+    style.configure("HealthIdle.TLabel", background=SURFACE_1, foreground=INK_SUBTLE, font=body_emphasis_font)
 
     style.configure("TLabelframe", background=SURFACE_1, bordercolor=HAIRLINE, borderwidth=1, relief="solid", padding=max(6, round(8 * scale)))
     style.configure("TLabelframe.Label", background=SURFACE_1, foreground=INK, font=body_emphasis_font)
@@ -743,9 +866,11 @@ def run_gui() -> int:
             self.role_start_buttons: Dict[str, ttk.Button] = {}
             self.role_stop_buttons: Dict[str, ttk.Button] = {}
             self.log_texts: Dict[str, tk.Text] = {}
+            self._log_display_cache: Dict[int, str] = {}
             self.juggler_handle: Optional[JugglerHandle] = None
             self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
             self.update_check_running = False
+            self.health_check_running = False
             self.style: Optional[ttk.Style] = None
             self.ui_scale = 1.0
             self._resize_after_id: Optional[str] = None
@@ -768,6 +893,9 @@ def run_gui() -> int:
             self.test_image_path = tk.StringVar(value="")
             self.status_vars = {role: tk.StringVar(value="Stopped") for role in ROLES}
             self.juggler_status = tk.StringVar(value="Stopped")
+            self.active_summary_var = tk.StringVar(value="no roles running")
+            self.health_dot_var = tk.StringVar(value="●")
+            self.health_summary_var = tk.StringVar(value="Idle — no roles running")
 
             self._build_layout(ttk, tk, filedialog, messagebox)
             self.root.bind("<Configure>", self._schedule_compact_resize)
@@ -778,6 +906,7 @@ def run_gui() -> int:
             self.root.after(400, self.poll_queue)
             self.root.after(1500, self.refresh_status)
             self.root.after(LOG_REFRESH_INTERVAL_MS, self.refresh_logs)
+            self.root.after(2000, self.refresh_health)
 
         def _build_layout(self, ttk, tk, filedialog, messagebox) -> None:
             main = ttk.Frame(self.root, padding=0, style="Canvas.TFrame")
@@ -922,7 +1051,7 @@ def run_gui() -> int:
             self._build_log_panel(logs_tab, ttk, tk)
 
             output_frame = ttk.LabelFrame(main, text="Output", padding=8, style="Panel.TLabelframe")
-            output_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0, 12))
+            output_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0, 8))
             output_frame.columnconfigure(0, weight=1)
             output_frame.rowconfigure(0, weight=1)
             self.output = tk.Text(
@@ -946,6 +1075,15 @@ def run_gui() -> int:
             output_x_scroll = ttk.Scrollbar(output_frame, orient=tk.HORIZONTAL, command=self.output.xview)
             output_x_scroll.grid(row=1, column=0, sticky="ew")
             self.output.configure(yscrollcommand=output_scroll.set, xscrollcommand=output_x_scroll.set)
+
+            ttk.Separator(main, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=2, sticky="ew")
+            status_bar = ttk.Frame(main, padding=(20, 5, 20, 6), style="StatusBar.TFrame")
+            status_bar.grid(row=5, column=0, columnspan=2, sticky="ew")
+            status_bar.columnconfigure(2, weight=1)
+            self.health_dot = ttk.Label(status_bar, textvariable=self.health_dot_var, style="HealthIdle.TLabel")
+            self.health_dot.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            ttk.Label(status_bar, textvariable=self.health_summary_var, style="StatusBarText.TLabel").grid(row=0, column=1, sticky="w")
+            ttk.Label(status_bar, textvariable=self.active_summary_var, style="StatusBarMuted.TLabel").grid(row=0, column=2, sticky="e")
 
         def _scrollable_tab_page(self, notebook, ttk, tk, *, padding):
             outer = ttk.Frame(notebook, style="Canvas.TFrame")
@@ -1384,7 +1522,7 @@ def run_gui() -> int:
                     message = f"[panel] preparing {role} launch"
                     if self.auto_tune.get() and not tune_file_exists(role, self.panel_dir):
                         message += f"; auto-tune output is written to {auto_tune_log_path(self.panel_dir)}"
-                    log_fh.write(f"{message}\n".encode("utf-8"))
+                    log_fh.write(panel_log_line(message).encode("utf-8"))
 
                 argv = build_role_argv(role, panel_dir=self.panel_dir, auto_tune=self.auto_tune.get())
                 log_fh = open(log_path, "ab", buffering=0)
@@ -1401,7 +1539,7 @@ def run_gui() -> int:
                     )
                     log_fh.write(launch_diagnostics(ROLE_LABELS[role], launch_argv, cwd=self.panel_dir, pid=proc.pid).encode("utf-8"))
                 except Exception as exc:
-                    log_fh.write(f"[panel] launch failed: {exc}\n".encode("utf-8", errors="replace"))
+                    log_fh.write(panel_log_line(f"[panel] launch failed: {exc}").encode("utf-8", errors="replace"))
                     raise
                 finally:
                     log_fh.close()
@@ -1564,27 +1702,42 @@ def run_gui() -> int:
             except Exception as exc:
                 self.queue.put(("update_install_error", str(exc)))
 
+        def _juggler_endpoint_label(self) -> str:
+            if self.juggler_handle is None:
+                return ""
+            if self.juggler_mode.get() == "gateway":
+                return f"gateway {self.gateway_bind.get()}:{self.gateway_port.get()}"
+            return "role proxies"
+
         def refresh_status(self) -> None:
+            active_roles: list[str] = []
             try:
                 config = load_config(self.panel_dir, apply_tune=False)
                 for role in ROLES:
                     if self.status_vars[role].get() in START_PENDING_STATUSES:
                         self.update_role_controls(role)
+                        active_roles.append(role)
                         continue
                     proc = self.role_processes.get(role)
                     if process_running(proc):
                         self.status_vars[role].set("Running")
                         self.update_role_controls(role)
+                        active_roles.append(role)
                         continue
                     if proc is not None:
                         self.role_processes.pop(role, None)
                     prefix = ROLE_PREFIX[role]
                     host = config["LLAMA_HOST"]
                     port = int(config[f"{prefix}_PORT"])
-                    self.status_vars[role].set("Port active" if port_in_use(host, port) else "Stopped")
+                    if port_in_use(host, port):
+                        self.status_vars[role].set("Port active")
+                        active_roles.append(role)
+                    else:
+                        self.status_vars[role].set("Stopped")
                     self.update_role_controls(role)
                 if self.juggler_handle is not None:
                     self.juggler_status.set("Running")
+                self.active_summary_var.set(active_summary(active_roles, self._juggler_endpoint_label()))
             finally:
                 self.root.after(2000, self.refresh_status)
 
@@ -1607,6 +1760,36 @@ def run_gui() -> int:
                 self.refresh_logs_once()
             finally:
                 self.root.after(LOG_REFRESH_INTERVAL_MS, self.refresh_logs)
+
+        def refresh_health(self) -> None:
+            try:
+                if not self.health_check_running:
+                    self.health_check_running = True
+                    threading.Thread(target=self._health_worker, daemon=True).start()
+            finally:
+                self.root.after(HEALTH_REFRESH_INTERVAL_MS, self.refresh_health)
+
+        def _health_worker(self) -> None:
+            results: list[tuple[str, bool, Optional[float]]] = []
+            try:
+                config = load_config(self.panel_dir, apply_tune=False)
+                host = config["LLAMA_HOST"]
+                for role in ROLES:
+                    prefix = ROLE_PREFIX[role]
+                    try:
+                        port = int(config[f"{prefix}_PORT"])
+                    except (KeyError, ValueError):
+                        continue
+                    # Only ping roles we believe are live, so stopped roles are
+                    # reported as absent rather than as failing health checks.
+                    if not process_running(self.role_processes.get(role)) and not port_in_use(host, port):
+                        continue
+                    ok, latency_ms = ping_health(health_endpoint(host, port))
+                    results.append((role, ok, latency_ms))
+            except Exception:
+                results = []
+            finally:
+                self.queue.put(("health_result", results))
 
         def poll_queue(self) -> None:
             while True:
@@ -1675,6 +1858,12 @@ def run_gui() -> int:
                     messagebox.showerror("Update install failed", message)
                 elif kind == "update_install_progress":
                     self.append_output(f"{payload}\n")
+                elif kind == "health_result":
+                    level, detail = summarize_health(payload)
+                    style_name, word = HEALTH_PRESENTATION[level]
+                    self.health_dot.configure(style=style_name)
+                    self.health_summary_var.set(f"{word} — {detail}")
+                    self.health_check_running = False
                 elif kind == "api_test_result":
                     title, message, test_type = payload
                     if test_type == "chat":
@@ -1697,10 +1886,26 @@ def run_gui() -> int:
             self.output.see("end")
 
         def replace_log_text(self, widget, text: str) -> None:
+            # Skip the rebuild entirely when nothing changed so the view does not
+            # flicker and the user keeps their selection between refreshes.
+            if self._log_display_cache.get(id(widget)) == text:
+                return
+            self._log_display_cache[id(widget)] = text
+            try:
+                top, bottom = widget.yview()
+            except Exception:
+                top, bottom = 0.0, 1.0
+            # Follow the tail only when the user is already parked at the bottom;
+            # otherwise restore their scroll position so live updates do not yank
+            # them away from what they are reading.
+            at_bottom = bottom >= 0.999
             widget.configure(state="normal")
             widget.delete("1.0", "end")
             widget.insert("end", text)
-            widget.see("end")
+            if at_bottom:
+                widget.see("end")
+            else:
+                widget.yview_moveto(top)
             widget.configure(state="disabled")
 
         def update_role_controls(self, role: str) -> None:

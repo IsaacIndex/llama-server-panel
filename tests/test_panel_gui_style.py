@@ -89,6 +89,23 @@ class PanelGuiStyleTest(unittest.TestCase):
         self.assertEqual(style.configured["SelectedSegment.TButton"]["foreground"], INVERSE_INK)
         self.assertEqual(style.configured["Field.TLabel"]["background"], SURFACE_1)
 
+    def test_status_bar_and_health_styles_are_registered(self) -> None:
+        root = RootStub()
+        style = StyleStub()
+
+        configure_carbon_style(root, style)
+
+        for name in (
+            "StatusBar.TFrame",
+            "StatusBarText.TLabel",
+            "StatusBarMuted.TLabel",
+            "HealthOk.TLabel",
+            "HealthWarn.TLabel",
+            "HealthBad.TLabel",
+            "HealthIdle.TLabel",
+        ):
+            self.assertIn(name, style.configured)
+
     def test_core_color_pairs_clear_accessibility_contrast(self) -> None:
         self.assertGreaterEqual(contrast_ratio(INK, CANVAS), 12.0)
         self.assertGreaterEqual(contrast_ratio(INK_MUTED, CANVAS), 7.0)
